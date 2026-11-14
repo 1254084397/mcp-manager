@@ -54,6 +54,7 @@ USER_PROFILE_DIR = DATA_DIR / "agents"
 
 PROFILE_DIR = Path(os.environ.get("MCP_MANAGER_PROFILES") or (RESOURCE_ROOT / "mcpmanager" / "agents"))
 CATALOG_PATH = RESOURCE_ROOT / "mcpmanager" / "catalog" / "servers.json"
+ICON_PATH = RESOURCE_ROOT / "assets" / "icon.ico"
 
 PLACEHOLDERS = {
     "home": HOME,

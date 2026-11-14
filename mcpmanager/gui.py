@@ -110,6 +110,11 @@ class App:
         self._enable_dpi()
         self.root = tk.Tk()
         self.root.title(f"MCP Manager {__version__}")
+        if paths.ICON_PATH.exists():
+            try:
+                self.root.iconbitmap(str(paths.ICON_PATH))
+            except tk.TclError:
+                pass
         self._apply_geometry()
         self.root.minsize(980, 620)
         self.root.report_callback_exception = self._report_exception
