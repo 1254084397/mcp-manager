@@ -189,6 +189,39 @@ class VersioningCommandTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("shell 操作符", detail)
 
+    def test_embedded_metacharacter_is_rejected(self) -> None:
+        ok, detail = versioning.run_custom_update("echo safe&whoami")
+        self.assertFalse(ok)
+        self.assertIn("元字符", detail)
+
+    @unittest.skipUnless(os.name == "nt", "Windows 解释器名称")
+    def test_windows_shell_entrypoint_is_rejected(self) -> None:
+        ok, detail = versioning.run_custom_update(["cmd", "/c", "echo", "hi"])
+        self.assertFalse(ok)
+        self.assertIn("解释器", detail)
+
+    @unittest.skipIf(os.name == "nt", "POSIX 解释器")
+    def test_posix_shell_entrypoint_is_rejected(self) -> None:
+        ok, detail = versioning.run_custom_update(["sh", "-c", "echo hi"])
+        self.assertFalse(ok)
+        self.assertIn("解释器", detail)
+
+    @unittest.skipUnless(os.name == "nt", "仅 Windows 使用 .cmd/.bat")
+    def test_arbitrary_batch_file_is_rejected(self) -> None:
+        script = Path(tempfile.mkdtemp()) / "evil.cmd"
+        script.write_text("@echo off\n", encoding="utf-8")
+        ok, detail = versioning.run_custom_update([str(script), "arg"])
+        self.assertFalse(ok)
+        self.assertIn("不允许直接执行任意", detail)
+
+    @unittest.skipUnless(os.name == "nt", "仅 Windows 使用 .cmd/.bat")
+    def test_allowed_shim_still_rejects_cmd_metacharacters(self) -> None:
+        script = Path(tempfile.mkdtemp()) / "npm.cmd"
+        script.write_text("@echo off\n", encoding="utf-8")
+        ok, detail = versioning.run_custom_update([str(script), "safe^whoami"])
+        self.assertFalse(ok)
+        self.assertIn("cmd 元字符", detail)
+
     def test_array_command_is_supported(self) -> None:
         ok, _detail = versioning.run_custom_update([sys.executable, "-c", "print('ok')"])
         self.assertTrue(ok)

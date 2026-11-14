@@ -1377,7 +1377,8 @@ class App:
                 "执行更新命令",
                 f"{name}\n\n命令：\n{shown}\n\n执行目录：\n{cwd}\n\n"
                 f"来源：\n{paths.REGISTRY_PATH} 的 updateCommand\n\n"
-                "该命令由注册表内容决定，不会经过 shell。请确认来源可信后继续。",
+                "该命令由注册表内容决定，确认后将作为本地程序执行，不是沙箱。"
+                "请确认来源可信后继续。",
                 parent=self.root,
             ):
                 return
@@ -1509,7 +1510,8 @@ class App:
             f"输入 {name} 的升级命令（留空清除）：\n"
             "例如：git -C D:/AI/laya pull\n"
             "或：D:/AI/laya/.venv/Scripts/python.exe -m pip install -U 包名\n\n"
-            "命令按参数执行，不经过 shell；不支持 &&、|、> 等操作符。",
+            "命令会在确认后作为本地程序执行，不是沙箱；不支持 &&、|、> 等操作符，"
+            "也不能使用 cmd、PowerShell、bash 作为入口。",
             initialvalue=current,
             parent=self.root,
         )

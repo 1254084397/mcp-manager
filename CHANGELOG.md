@@ -2,6 +2,25 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [1.2.2] - 2026-11-14
+
+### 安全
+
+- 拒绝把 `cmd`、PowerShell、`bash`、`sh`、WSL 等 shell 解释器作为自定义更新命令入口。
+- 拒绝直接执行任意 `.cmd`/`.bat`，只允许 `npm`、`npx`、`pnpm`、`yarn`、`corepack` 的包装脚本。
+- 对允许的 `.cmd` 包装脚本，额外拒绝 `^`、`()` 等 cmd 元字符；对所有命令参数拒绝 `&`、`|`、`;`、`<`、`>`，避免 `safe&whoami` 这类内容被 `cmd /c` 解释。
+- 修正安全说明：更新命令是用户确认后执行的任意本地程序，不是沙箱；`shell=False` 只表示管理器不主动调用 shell，不限制被启动程序再启动 shell。
+
+### 文档
+
+- README 增加“平台范围”：Windows 优先，Linux/macOS 仅保证核心模块和通用配置逻辑，未覆盖真实 Agent 安装路径。
+- SECURITY.md 和 GUI 提示同步更新更新命令的安全边界表述。
+
+### 测试
+
+- 新增 5 项更新命令安全测试：嵌入元字符、Windows/POSIX shell 入口、任意 `.cmd`、允许脚本中的 cmd 元字符。
+- 全量测试通过：Windows 下 58 passed、1 skipped；Linux CI 覆盖 POSIX shell 入口。
+
 ## [1.2.1] - 2026-11-14
 
 ### 修复

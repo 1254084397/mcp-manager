@@ -194,6 +194,25 @@ def npm_install_global(package: str, version: str) -> tuple[bool, str]:
 
 
 SHELL_OPERATORS = {"&&", "||", "|", ";", ">", ">>", "<", "&"}
+SHELL_META = set("&|;<>")
+CMD_META = set("&|;<>^()")
+
+SHELL_ENTRYPOINTS = {
+    "cmd", "cmd.exe",
+    "powershell", "powershell.exe", "pwsh", "pwsh.exe",
+    "bash", "bash.exe", "sh", "sh.exe", "zsh", "zsh.exe",
+    "wsl", "wsl.exe", "cscript", "cscript.exe", "wscript", "wscript.exe",
+    "mshta", "mshta.exe",
+}
+
+# .cmd/.bat shims that package managers install on Windows. Anything else must
+# be invoked through its real .exe so the manager never hands arbitrary batch
+# files to cmd.exe.
+ALLOWED_CMD_SHIMS = {"npm.cmd", "npx.cmd", "pnpm.cmd", "yarn.cmd", "corepack.cmd"}
+
+
+def _metacharacters(value: str, allowed: set[str]) -> list[str]:
+    return sorted({char for char in value if char in allowed})
 
 
 def format_command(command: str | list[str] | tuple[str, ...] | None) -> str:
@@ -230,7 +249,12 @@ def split_command(command: str | list[str] | tuple[str, ...]) -> list[str]:
 def run_custom_update(
     command: str | list[str] | tuple[str, ...], cwd: str | Path | None = None
 ) -> tuple[bool, str]:
-    """Run a stored upgrade command as argv, never through a shell."""
+    """Run a stored upgrade command as argv.
+
+    The manager never invokes a shell on its own. Shell interpreters and
+    arbitrary ``.cmd``/``.bat`` files are rejected; only known package-manager
+    shims are allowed through ``cmd /c``.
+    """
     from . import paths
 
     if paths.read_only():
@@ -245,6 +269,13 @@ def run_custom_update(
             + "、".join(operators)
             + "）。请拆成单条命令，或在注册表中改用参数数组。"
         )
+    risky = sorted({char for part in parts[1:] for char in _metacharacters(part, SHELL_META)})
+    if risky:
+        return False, (
+            "更新命令参数包含 shell 元字符（"
+            + "、".join(risky)
+            + "）。为避免被 cmd 解释，请去掉 &、|、;、<、> 等字符。"
+        )
     executable = parts[0]
     if os.path.dirname(executable):
         resolved = executable if Path(executable).is_file() else None
@@ -252,8 +283,26 @@ def run_custom_update(
         resolved = shutil.which(executable)
     if not resolved:
         return False, f"未找到可执行文件：{executable}"
+    name = Path(resolved).name.lower()
+    if name in SHELL_ENTRYPOINTS:
+        return False, (
+            "不允许把 cmd、PowerShell、bash 等 shell 解释器作为更新命令入口。"
+            "请直接填写要运行的 .exe，并在注册表中改用参数数组。"
+        )
     argv = [resolved, *parts[1:]]
-    if os.name == "nt" and resolved.lower().endswith((".cmd", ".bat")):
+    if os.name == "nt" and name.endswith((".cmd", ".bat")):
+        if name not in ALLOWED_CMD_SHIMS:
+            return False, (
+                "不允许直接执行任意 .cmd/.bat 更新命令。"
+                "请改用对应的 .exe，或只使用 npm/npx/pnpm/yarn/corepack 包装脚本。"
+            )
+        cmd_risky = sorted({char for part in parts[1:] for char in _metacharacters(part, CMD_META)})
+        if cmd_risky:
+            return False, (
+                "该 .cmd 更新命令的参数包含 cmd 元字符（"
+                + "、".join(cmd_risky)
+                + "），会被 cmd /c 解释，已拒绝执行。"
+            )
         argv = ["cmd", "/c", *argv]
     try:
         result = subprocess.run(

@@ -21,6 +21,10 @@
 - JSON/JSONC 只替换顶层 MCP 区块，保留注释和无关配置；TOML 只替换 `[mcp_servers*]` 表组。
 - 个人数据（注册表、备份、候选、报告）全部在 `local/`，不会进入版本库。
 
+## 平台范围
+
+**Windows 优先。** 内置 Agent profile 主要按 Windows 的用户目录、`%APPDATA%` 和 `%LOCALAPPDATA%` 设计，已在 Windows 上验证扫描、诊断和真实握手。Linux/macOS 目前只保证核心模块、格式读写、扫描和握手逻辑可运行；未覆盖真实 Agent 安装路径，也不代表这些平台上的 Agent 集成已经验证。Ubuntu CI 用于保护内核和 CLI，不改变这一支持范围。
+
 ## 快速开始
 
 需要 Python 3.11+。
@@ -242,7 +246,8 @@ aliases = ["myagent"]
 - 只替换 MCP 区块，其余配置和注释保持不变；无法安全替换时中止而不是整文件覆盖。
 - profile 标记 `readonly` 时永久跳过写入。
 - `--read-only` / `MCP_MANAGER_READ_ONLY=1` 会阻止写入注册表、写入 Agent 配置、安装、升级、应用候选和删除条目，适合首次试用和安全审查。
-- 自定义更新命令会在执行前显示完整命令、执行目录和来源，并要求确认；按参数执行，不经过 shell，且拒绝 `&&`、`|`、`>` 等操作符。
+- 自定义更新命令会在执行前显示完整命令、执行目录和来源，并要求确认；它是确认后执行的任意本地程序，不是沙箱，`shell=False` 只表示管理器不主动调用 shell 解析命令。
+- 管理器拒绝 `cmd`、PowerShell、`bash` 等解释器作为更新入口，拒绝任意 `.cmd`/`.bat`，只允许 npm/npx/pnpm/yarn/corepack 的 `.cmd` 包装脚本，并拒绝参数中的 shell 元字符。
 - 握手测试只对用户明确选择的 MCP 启动进程，结束后清理进程树，不会在扫描时自动启动服务。
 
 ## 开发
