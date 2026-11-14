@@ -1,8 +1,22 @@
+<div align="center">
+
+<img src="assets/icon.png" alt="MCP Manager" width="128" height="128">
+
 # MCP Manager
 
-跨 Agent 的 MCP 管理工具：扫描、检查、备份、同步和升级 MCP 服务。
+**跨 Agent 的 MCP 管理工具：扫描、检查、备份、同步和升级 MCP 服务。**
 
-更新记录见 [CHANGELOG.md](CHANGELOG.md)，安全边界见 [SECURITY.md](SECURITY.md)，参与贡献见 [CONTRIBUTING.md](CONTRIBUTING.md)，行为准则见 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
+[![Release](https://img.shields.io/github/v/release/1254084397/mcp-manager?include_prereleases&style=flat-square&color=0ea5e9)](https://github.com/1254084397/mcp-manager/releases/latest)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
+[![Platform](https://img.shields.io/badge/Platform-Windows-0078d4?style=flat-square&logo=windows&logoColor=white)](https://github.com/1254084397/mcp-manager)
+[![License](https://img.shields.io/badge/License-MIT-10b981?style=flat-square)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/1254084397/mcp-manager/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/1254084397/mcp-manager/actions)
+
+[更新记录](CHANGELOG.md) · [安全边界](SECURITY.md) · [参与贡献](CONTRIBUTING.md) · [行为准则](CODE_OF_CONDUCT.md)
+
+</div>
+
+---
 
 每个 AI Agent 的 MCP 配置都不一样：
 
