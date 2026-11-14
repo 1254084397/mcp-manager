@@ -2,6 +2,28 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [1.3.0] - 2026-11-14
+
+### 新增
+
+- GUI 新增「操作 → 添加 MCP…」入口，可填写 command/URL、参数、环境变量、包名和版本，登记后自动为当前选中的 Agent 生成候选配置。
+- 环境变量改为逐行 key/value 输入，值可包含分号和等号，不再被错误拆分。
+- 已在注册表中的 MCP 可直接为新 Agent 生成候选，无需重复填写定义；自动把新 Agent 追加到该 MCP 的 `agents` 列表。
+- 新增 `creation.build_server_spec` 校验模块，覆盖名称必填、command/URL 二选一、URL 格式、参数解析、环境变量非空与去重、版本关联包名等规则。
+- 新增 `sync.attach_agent_and_install`，封装「追加 Agent → 生成候选」事务并返回是否修改注册表。
+
+### 安全
+
+- 新建 MCP 和复用已有 MCP 两条分支都会检测疑似密钥环境变量，只提示变量名不显示值，并建议改用系统环境变量或密钥文件。
+- 登记流程使用注册表副本生成候选，候选成功后才保存注册表，避免候选失败留下半完成状态。
+- 候选文件名对 MCP 名称做 URL 编码，防止特殊字符导致文件名非法。
+
+### 测试
+
+- 新增 `tests/test_creation.py`，覆盖输入校验、密钥检测、环境变量值含分号/等号等场景。
+- `tests/test_core.py` 新增 `attach_agent_and_install` 的三项测试：追加 Agent、Agent 已在列表时跳过、MCP 不存在时报错。
+- 全量测试通过：68 passed、1 skipped。
+
 ## [1.2.2] - 2026-11-14
 
 ### 安全
