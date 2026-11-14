@@ -2,6 +2,8 @@
 
 跨 Agent 的 MCP 管理工具：扫描、检查、备份、同步和升级 MCP 服务。
 
+更新记录见 [CHANGELOG.md](CHANGELOG.md)。
+
 每个 AI Agent 的 MCP 配置都不一样：
 
 - 路径不同：Trae、VS Code、OpenCode、Codex、Claude Code 各放一处；
@@ -14,6 +16,7 @@
 
 - `mcpmanager/`：与 Agent 无关的内核（注册表、扫描、格式读写、版本查询、诊断、同步）。
 - `mcpmanager/agents/*.toml`：每个 Agent 的路径、格式和字段差异。
+- 每个 Agent 可以声明一份主配置和多份附加配置；读取时合并，写入只改主配置，附加配置只读。
 - 写入采用 **候选 → 审阅 → 应用**：先生成候选文件，确认后才写入，写入前自动备份。
 - JSON/JSONC 只替换顶层 MCP 区块，保留注释和无关配置；TOML 只替换 `[mcp_servers*]` 表组。
 - 个人数据（注册表、备份、候选、报告）全部在 `local/`，不会进入版本库。
@@ -34,6 +37,12 @@ python -m mcpmanager scan
 
 # 检查命令和本地运行时
 python -m mcpmanager doctor --agent trae --env
+
+# 真实握手：启动 MCP，执行 initialize 和 tools/list
+python -m mcpmanager probe --agent trae
+
+# 只测试一个 MCP
+python -m mcpmanager probe --agent trae --name context-mode --timeout 15
 
 # 查询 npm / PyPI 最新版本
 python -m mcpmanager updates
@@ -64,9 +73,9 @@ mcpmanager agents
 
 `python -m mcpmanager gui` 打开桌面管理器：
 
-- 左侧 Agent 侧栏，绿点表示该 Agent 的配置文件已存在；
-- 顶部搜索、列排序、右键菜单（诊断、改版本、更新、移除登记）；
-- 下方详情面板显示启动命令、参数、脱敏后的环境变量和配置来源；
+- 左侧 Agent 侧栏，绿点表示该 Agent 至少一份配置文件存在；
+- 顶部搜索、列排序、右键菜单（诊断、握手测试、改版本、更新、移除登记）；
+- 下方详情面板显示启动命令、参数、脱敏后的环境变量和来源文件；附加配置中的 MCP 标记为“附加配置·只读”；
 - 备份管理器可列出、恢复或打开历史备份；
 - 可直接修改当前 Agent 的配置位置（支持 `D:/`、`E:/` 等绝对路径），保存为 `local/agents/<id>.toml` 本机覆盖，并可一键恢复默认；
 - 支持浅色/深色主题；窗口大小、所选 Agent、日志状态会记住（`local/settings.json`）；
@@ -78,10 +87,11 @@ mcpmanager agents
 
 | 命令 | 作用 |
 | --- | --- |
-| `agents` | 列出 Agent profile、配置路径和是否存在 |
-| `list [--agent ID]` | 列出某个 Agent 已配置的 MCP |
-| `scan [--json]` | 扫描本机配置，输出未登记 MCP 报告 |
-| `doctor --agent ID [--network] [--env]` | 检查 command 路径、参数路径，可选探测远程 URL |
+| `agents` | 列出 Agent profile、主配置、附加配置及是否存在 |
+| `list [--agent ID]` | 列出某个 Agent 已配置的 MCP（合并主配置与附加配置） |
+| `scan [--json]` | 扫描本机配置，按来源分级并输出未登记报告 |
+| `doctor --agent ID [--network] [--env]` | 检查配置、command 路径、参数路径和本地运行时，可选探测远程 URL |
+| `probe --agent ID [--name MCP] [--timeout 秒]` | 真实启动 MCP，执行 initialize 和 tools/list |
 | `updates` | 对比注册表版本与 npm/PyPI 最新版本 |
 | `sync --agent ID [--apply] [--yes]` | 生成候选；`--apply` 备份后写入 |
 | `apply 候选文件 [--yes]` | 应用指定候选（含安装候选） |
@@ -101,8 +111,9 @@ mcpmanager/                核心代码
   formats.py               JSON / JSONC / TOML 读写与局部替换
   adapters.py              标准字段 <-> 各 Agent 字段
   sync.py                  候选生成、备份、应用
-  discovery.py             扫描
-  doctor.py                诊断
+  discovery.py             扫描与配置来源分级
+  doctor.py                配置与运行时诊断
+  handshake.py             MCP 协议握手（initialize / tools/list）
   versioning.py            npm / PyPI 版本
   cli.py, gui.py           CLI 与图形界面
 local/                     个人数据（已 gitignore）
@@ -143,6 +154,7 @@ aliases = ["myagent"]
 | --- | --- | --- |
 | `id` / `name` | 字符串 | 唯一标识和显示名 |
 | `config` | 路径模板 | 支持 `{home}`、`{appdata}`、`{localappdata}`、`{project}`、`{data}` |
+| `configs` | 数组 | 附加只读配置路径；主配置优先，缺失自动跳过 |
 | `format` | `json` / `jsonc` / `toml` | 配置文件格式 |
 | `schema` | 字符串 | 存放 MCP 的顶层键，如 `mcpServers`、`servers`、`mcp`、`mcp_servers` |
 | `command` | `string` / `array` | `array` 表示写成 `["node", "server.js"]` |
@@ -179,6 +191,16 @@ aliases = ["myagent"]
 - `versionPolicy = "pin-before-sync"`：同步时把 `args` 里的包版本固定为 `version`；
 - `kind` 含 `npm` 走 npm 查询，含 `uv`/`python`/`pip` 走 PyPI；
 - `agents` 使用 profile 的 `id`，`"*"` 表示全部。
+
+## 诊断与握手
+
+两者解决不同层次的问题：
+
+- `doctor`：静态检查。确认命令、脚本、参数路径、运行时和远程 URL 是否存在。
+- `probe`：动态握手。真正启动 MCP，发送 `initialize`，再请求 `tools/list`，并区分启动失败、初始化超时、协议错误和鉴权失败。
+- 具体业务工具：握手成功只证明服务可用和工具能列出；工具是否需要 API Key、浏览器、项目目录或特定数据，仍要按 MCP 单独做代表性只读调用。
+
+图形界面中右键某个 MCP，可以分别运行“诊断此 MCP”和“运行握手测试”。
 
 ## 安全模型
 

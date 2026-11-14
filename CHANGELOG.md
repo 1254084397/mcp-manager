@@ -1,0 +1,42 @@
+# 更新说明
+
+本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
+
+## [1.1.0] - 2026-11-14
+
+### 新增
+
+- **多配置源合并**：Agent profile 支持 `configs` 声明附加配置。主配置优先，附加配置只读合并；附加文件缺失时自动跳过，不会报错。
+- **Antigravity 双配置模型**：主配置为 `~/.gemini/config/mcp_config.json`，并把 `~/.gemini/antigravity/mcp_config.json` 声明为可选只读附加来源。
+- **真实 MCP 握手测试**：新增 `handshake.py` 和 `probe` 命令。会真正启动 stdio MCP（或请求远程 HTTP MCP），依次执行 `initialize`、`notifications/initialized`、`tools/list`，返回服务信息和工具列表。
+- **握手错误分级**：区分配置缺失、启动失败、初始化超时、协议错误和鉴权失败；GUI 右键菜单新增“运行握手测试”。
+- **扫描来源分级**：扫描结果区分当前生效配置、用户配置、插件配置、市场缓存、历史备份、候选配置。未登记警告只针对当前生效配置，缓存/插件/备份单独列出。
+- **宿主级识别**：由 Agent 运行时提供的 MCP 不计入“未登记”警告。
+- **右键登记**：从当前 Agent 配置中发现、但主注册表没有的 MCP，可直接登记，随后参与版本、更新和移除管理。
+- **自定义更新命令**：注册表条目可以配置自己的更新命令，不局限于 npm / PyPI。
+
+### 改进
+
+- `mcpmanager agents` 会展示附加只读配置路径，并标注“存在”或“缺失，自动跳过”。
+- `mcpmanager list` 会显示每个 MCP 的来源文件，附加配置来源标记为“附加配置·只读”。
+- `doctor` 使用合并后的配置进行诊断，不再只看主配置文件。
+- `scan` 报告新增 `effectiveServers`、`userServers`、`cachedServers` 和对应的未登记分组。
+- PyPI 版本查询增加重试，并支持 `PIP_INDEX_URL` / `UV_INDEX_URL` 和清华镜像回退。
+- 注册表已登记但当前 Agent 未安装的 MCP 会明确显示为“注册表已登记（未安装）”。
+
+### 验证
+
+- `python -m unittest discover -s tests -v`：17 项全部通过。
+- `python -m mcpmanager probe --agent antigravity --timeout 15`：laya、playwright、context-mode、xerj 均握手成功。
+- `python -m mcpmanager scan`：32 个有效配置、29 个 MCP 名称、17 个当前生效 MCP，当前生效但未登记的 MCP 为 0。
+
+### 说明
+
+握手成功只表示服务能启动、协议能握手、工具能列出，不代表每个工具的业务功能、鉴权或外部依赖都正常。具体工具仍需按 MCP 做代表性调用。
+
+## [1.0.0] - 初始版本
+
+- 声明式 Agent profile，支持 JSON、JSONC、TOML。
+- 配置扫描、静态诊断、候选生成、备份与应用。
+- npm / PyPI 版本查询。
+- 命令行与桌面图形界面。
