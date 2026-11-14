@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import time
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 from .registry import normalize_version
@@ -122,15 +124,69 @@ def npm_install_global(package: str, version: str) -> tuple[bool, str]:
     return True, output[-1500:]
 
 
-def run_custom_update(command: str) -> tuple[bool, str]:
-    """Run a user supplied upgrade command (git pull, pip install -U, ...)."""
-    command = command.strip()
-    if not command:
+SHELL_OPERATORS = {"&&", "||", "|", ";", ">", ">>", "<", "&"}
+
+
+def format_command(command: str | list[str] | tuple[str, ...] | None) -> str:
+    """Render a stored update command for display without executing it."""
+    if isinstance(command, (list, tuple)):
+        return subprocess.list2cmdline([str(item) for item in command])
+    return str(command or "").strip()
+
+
+def split_command(command: str | list[str] | tuple[str, ...]) -> list[str]:
+    """Turn a stored command into an argv list.
+
+    Strings are tokenised without invoking a shell. Windows quoting is kept
+    intact so paths such as ``"D:\\AI\\my server"`` survive, while quotes around
+    a whole token are removed for subprocess.
+    """
+    if isinstance(command, (list, tuple)):
+        return [str(item) for item in command if str(item)]
+    text = str(command).strip()
+    if not text:
+        return []
+    if os.name == "nt":
+        parts = shlex.split(text, posix=False)
+        return [
+            item[1:-1]
+            if len(item) >= 2 and item[0] == item[-1] and item[0] in "\"'"
+            else item
+            for item in parts
+            if item
+        ]
+    return shlex.split(text)
+
+
+def run_custom_update(
+    command: str | list[str] | tuple[str, ...], cwd: str | Path | None = None
+) -> tuple[bool, str]:
+    """Run a stored upgrade command as argv, never through a shell."""
+    parts = split_command(command)
+    if not parts:
         return False, "更新命令为空"
+    operators = [part for part in parts if part in SHELL_OPERATORS]
+    if operators:
+        return False, (
+            "更新命令不支持 shell 操作符（"
+            + "、".join(operators)
+            + "）。请拆成单条命令，或在注册表中改用参数数组。"
+        )
+    executable = parts[0]
+    if os.path.dirname(executable):
+        resolved = executable if Path(executable).is_file() else None
+    else:
+        resolved = shutil.which(executable)
+    if not resolved:
+        return False, f"未找到可执行文件：{executable}"
+    argv = [resolved, *parts[1:]]
+    if os.name == "nt" and resolved.lower().endswith((".cmd", ".bat")):
+        argv = ["cmd", "/c", *argv]
     try:
         result = subprocess.run(
-            command,
-            shell=True,
+            argv,
+            shell=False,
+            cwd=str(cwd) if cwd else None,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -144,3 +200,4 @@ def run_custom_update(command: str) -> tuple[bool, str]:
     if result.returncode != 0:
         return False, output[-2000:] or f"命令返回 {result.returncode}"
     return True, output[-2000:]
+

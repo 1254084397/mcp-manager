@@ -1,3 +1,3 @@
 """Agent-agnostic MCP manager core."""
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"

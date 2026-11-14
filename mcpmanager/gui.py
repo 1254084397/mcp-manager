@@ -752,7 +752,7 @@ class App:
             for key, value in env.items():
                 secret = any(marker in str(key).lower() for marker in adapters.SECRET_MARKERS)
                 lines.append(f"  {key} = {'***' if secret else value}")
-        update_command = str(spec.get("updateCommand") or "")
+        update_command = versioning.format_command(spec.get("updateCommand"))
         if update_command:
             lines.append(f"更新命令    {update_command}")
         source = row.get("source") or str(profile.path)
@@ -1326,15 +1326,21 @@ class App:
         if spec is None:
             messagebox.showerror("未登记", f"{name} 只在 Agent 配置中发现，不在主注册表中。", parent=self.root)
             return
-        command = str(spec.get("updateCommand") or "").strip()
-        if command:
+        command = spec.get("updateCommand")
+        shown = versioning.format_command(command)
+        if shown:
+            cwd = os.getcwd()
             if not messagebox.askyesno(
-                "执行更新命令", f"{name}\n\n将执行：\n{command}\n\n继续吗？", parent=self.root
+                "执行更新命令",
+                f"{name}\n\n命令：\n{shown}\n\n执行目录：\n{cwd}\n\n"
+                f"来源：\n{paths.REGISTRY_PATH} 的 updateCommand\n\n"
+                "该命令由注册表内容决定，不会经过 shell。请确认来源可信后继续。",
+                parent=self.root,
             ):
                 return
             self.run_task(
                 f"正在更新 {name}…",
-                lambda: versioning.run_custom_update(command),
+                lambda: versioning.run_custom_update(command, cwd=cwd),
                 lambda result: self._after_custom_update(name, result),
             )
             return
@@ -1438,12 +1444,13 @@ class App:
         if spec is None:
             messagebox.showinfo("未登记", f"{name} 不在主注册表中，请先登记。", parent=self.root)
             return
-        current = str(spec.get("updateCommand") or "")
+        current = versioning.format_command(spec.get("updateCommand"))
         command = simpledialog.askstring(
             "设置更新命令",
             f"输入 {name} 的升级命令（留空清除）：\n"
             "例如：git -C D:/AI/laya pull\n"
-            "或：D:/AI/laya/.venv/Scripts/python.exe -m pip install -U 包名",
+            "或：D:/AI/laya/.venv/Scripts/python.exe -m pip install -U 包名\n\n"
+            "命令按参数执行，不经过 shell；不支持 &&、|、> 等操作符。",
             initialvalue=current,
             parent=self.root,
         )

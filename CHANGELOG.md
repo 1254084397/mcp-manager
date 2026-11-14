@@ -2,6 +2,27 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [1.1.1] - 2026-11-14
+
+### 安全
+
+- 移除自定义更新命令中的 `shell=True`。`updateCommand` 现在按参数数组执行，也支持在注册表中直接写成数组。
+- 执行前在图形界面显示完整命令、执行目录和来源，并要求确认。
+- 拒绝 `&&`、`||`、`|`、`;`、`>`、`<` 等 shell 操作符，避免把注入内容当作命令解释。
+- 增加 [SECURITY.md](SECURITY.md)，说明本地数据、网络请求、进程执行和漏洞报告方式。
+
+### 改进
+
+- 握手结束时清理整个进程树：Windows 使用 `taskkill /T /F`，POSIX 使用独立进程组。
+- README 新增“使用边界”，明确配置存在、进程启动、协议握手、业务工具可用是四种不同状态；并说明“当前生效配置”是根据 profile 推断，不代表 Agent 实际加载优先级。
+- README 的开发命令同时列出 `pytest` 和 `unittest`。
+
+### 测试
+
+- 新增 `tests/test_handshake.py` 及 stdio / HTTP fixture，覆盖 initialize、tools/list、无工具、初始化超时、进程提前退出、HTTP 401、SSE 响应和子进程树清理。
+- 新增更新命令解析测试：Windows 路径引号、shell 操作符拒绝、参数数组执行。
+- 自动测试从 17 项增加到 29 项。
+
 ## [1.1.0] - 2026-11-14
 
 ### 新增

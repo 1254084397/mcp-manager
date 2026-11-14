@@ -2,7 +2,7 @@
 
 跨 Agent 的 MCP 管理工具：扫描、检查、备份、同步和升级 MCP 服务。
 
-更新记录见 [CHANGELOG.md](CHANGELOG.md)。
+更新记录见 [CHANGELOG.md](CHANGELOG.md)，安全边界见 [SECURITY.md](SECURITY.md)。
 
 每个 AI Agent 的 MCP 配置都不一样：
 
@@ -202,6 +202,19 @@ aliases = ["myagent"]
 
 图形界面中右键某个 MCP，可以分别运行“诊断此 MCP”和“运行握手测试”。
 
+## 使用边界
+
+以下四件事不是一回事：
+
+| 状态 | 含义 | 如何确认 |
+| --- | --- | --- |
+| 配置文件存在 | 扫描到了配置 | `agents` / `scan` |
+| MCP 进程能启动 | 命令、参数和运行时可用 | `doctor` |
+| 协议能握手 | `initialize` 和 `tools/list` 成功 | `probe` |
+| 工具能正常调用 | 业务功能、鉴权、外部依赖正常 | 需要按 MCP 单独调用 |
+
+“当前生效配置”是根据 Agent profile 推断的配置来源，不代表 Agent 内部一定按该优先级加载。插件、工作区配置和 Agent 内置配置的真实优先级由各 Agent 自己决定。
+
 ## 安全模型
 
 - 不会静默改 Agent：先写候选，应用时校验源文件哈希，变化则拒绝。
@@ -209,16 +222,22 @@ aliases = ["myagent"]
 - 不把内嵌凭据复制进候选；如果某个 MCP 在 Agent 配置里写了明文密钥，会停止生成，除非注册表里有对应的无密启动方式。
 - 只替换 MCP 区块，其余配置和注释保持不变；无法安全替换时中止而不是整文件覆盖。
 - profile 标记 `readonly` 时永久跳过写入。
+- 自定义更新命令会在执行前显示完整命令、执行目录和来源，并要求确认；按参数执行，不经过 shell，且拒绝 `&&`、`|`、`>` 等操作符。
+- 握手测试只对用户明确选择的 MCP 启动进程，结束后清理进程树，不会在扫描时自动启动服务。
 
 ## 开发
 
 ```powershell
+# 推荐
+python -m pytest -q
+
+# 也可以只用标准库
 python -m unittest discover -s tests -v
 ```
 
 GitHub Actions 会在 Windows 和 Ubuntu 上、Python 3.11/3.12 下运行同一套测试。
 
-测试覆盖：profile 加载、别名解析、Agent 字段转换、版本固定、JSONC 注释保留、TOML 表组替换、候选生成与应用、过期候选拒绝、明文密钥拦截。
+测试覆盖：profile 加载、别名解析、Agent 字段转换、版本固定、JSONC 注释保留、TOML 表组替换、候选生成与应用、过期候选拒绝、明文密钥拦截，以及 stdio/HTTP 握手、初始化超时、进程提前退出、HTTP 401、SSE 响应和子进程树清理。
 
 ## 从旧版迁移
 

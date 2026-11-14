@@ -12,6 +12,7 @@ import json
 import os
 import queue
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -139,6 +140,10 @@ def _probe_stdio(
 ) -> dict[str, Any]:
     argv = _argv(command, args)
     cwd = spec.get("cwd")
+    options: dict[str, Any] = {}
+    if os.name != "nt":
+        # Own process group so timeout cleanup can reach grandchildren too.
+        options["start_new_session"] = True
     try:
         process = subprocess.Popen(
             argv,
@@ -152,6 +157,7 @@ def _probe_stdio(
             cwd=str(cwd) if isinstance(cwd, str) and cwd else None,
             env=_environment(spec, profile),
             creationflags=CREATE_NO_WINDOW,
+            **options,
         )
     except Exception as exc:  # noqa: BLE001 - reported as a start failure
         return _result(False, STAGE_START, f"启动失败：{exc}", kind="start")
@@ -256,20 +262,43 @@ def _stderr_hint(stderr: list[str]) -> str:
 
 
 def _stop(process: subprocess.Popen) -> None:
-    try:
-        if process.stdin:
-            process.stdin.close()
-    except Exception:
-        pass
-    if process.poll() is None:
+    if os.name == "nt":
+        # MCP servers often spawn node/browser children; taskkill /T removes the
+        # whole tree, while terminate() would only stop the parent. Do this
+        # before closing stdin so the parent is still alive while /T walks it.
         try:
-            process.terminate()
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                timeout=10,
+                creationflags=CREATE_NO_WINDOW,
+            )
+        except Exception:
+            pass
+        try:
             process.wait(timeout=3)
         except Exception:
             try:
                 process.kill()
             except Exception:
                 pass
+    elif process.poll() is None:
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            process.wait(timeout=2)
+        except Exception:
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+    try:
+        if process.stdin:
+            process.stdin.close()
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- #
