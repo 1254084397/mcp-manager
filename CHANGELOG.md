@@ -2,6 +2,13 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [1.3.1] - 2026-11-14
+
+### 视觉
+
+- 新增应用图标（立方体线条设计，蓝紫渐变），GUI 窗口和 Windows EXE 均使用该图标。
+- `assets/` 目录包含 SVG 设计稿、`make_icon.py` 生成脚本和 `icon.ico`，便于后续调整。
+
 ## [1.3.0] - 2026-11-14
 
 ### 新增
