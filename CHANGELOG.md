@@ -2,6 +2,23 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [1.2.1] - 2026-11-14
+
+### 修复
+
+- 握手结束后等待读取线程退出，并显式关闭 stdin/stdout/stderr，消除测试中的 `ResourceWarning`。
+- 测试中的 HTTP fixture 在结束时关闭子进程管道。
+
+### 改进
+
+- CI 新增打包任务：构建 wheel 和 sdist，安装 wheel 后运行 `mcpmanager --help` 和 `mcpmanager agents`。
+- `pyproject.toml` 补充 Homepage、Repository、Issues、Changelog、关键词、分类器，以及 Python 3.11/3.12 元数据。
+- 将 `tests/test_p2_features.py` 纳入版本控制，确保 CI 执行 P2 测试。
+
+### 测试
+
+- 全量测试保持 54 项通过，并在 `-W error::ResourceWarning` 下通过。
+
 ## [1.2.0] - 2026-11-14
 
 ### 新增

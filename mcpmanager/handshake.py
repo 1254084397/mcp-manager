@@ -173,9 +173,14 @@ def _probe_stdio(
         finally:
             lines.put(None)
 
-    threading.Thread(target=reader, daemon=True).start()
+    threads: list[threading.Thread] = []
+    reader_thread = threading.Thread(target=reader, daemon=True)
+    reader_thread.start()
+    threads.append(reader_thread)
     if process.stderr is not None:
-        threading.Thread(target=_drain, args=(process.stderr, stderr), daemon=True).start()
+        stderr_thread = threading.Thread(target=_drain, args=(process.stderr, stderr), daemon=True)
+        stderr_thread.start()
+        threads.append(stderr_thread)
 
     def send(payload: dict[str, Any]) -> None:
         try:
@@ -252,6 +257,9 @@ def _probe_stdio(
         return _result(False, exc.stage, exc.detail, kind=exc.kind)
     finally:
         _stop(process)
+        for thread in threads:
+            thread.join(timeout=1.0)
+        _close_pipes(process)
 
 
 def _stderr_hint(stderr: list[str]) -> str:
@@ -297,6 +305,16 @@ def _stop(process: subprocess.Popen) -> None:
             process.stdin.close()
     except Exception:
         pass
+
+
+def _close_pipes(process: subprocess.Popen) -> None:
+    """Close Popen pipes after reader threads have stopped."""
+    for stream in (process.stdin, process.stdout, process.stderr):
+        try:
+            if stream:
+                stream.close()
+        except Exception:
+            pass
 
 
 # --------------------------------------------------------------------------- #

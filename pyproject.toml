@@ -1,21 +1,42 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcp-manager"
-version = "1.2.0"
+version = "1.2.1"
 description = "Agent-agnostic MCP configuration manager: scan, sync, diagnose and upgrade MCP servers across AI agents"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "mcp-manager contributors" }]
+keywords = ["MCP", "Model Context Protocol", "AI agents", "configuration", "CLI", "Windows"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Configuration",
+    "Topic :: System :: Systems Administration",
+]
+
+[project.urls]
+Homepage = "https://github.com/1254084397/mcp-manager"
+Repository = "https://github.com/1254084397/mcp-manager"
+Issues = "https://github.com/1254084397/mcp-manager/issues"
+Changelog = "https://github.com/1254084397/mcp-manager/blob/main/CHANGELOG.md"
 
 [project.scripts]
 mcpmanager = "mcpmanager.cli:main"
 
 [tool.setuptools]
-packages = ["mcpmanager"]
+packages = ["mcpmanager", "mcpmanager.agents", "mcpmanager.catalog"]
 
 [tool.setuptools.package-data]
-mcpmanager = ["agents/*.toml", "catalog/*.json"]
+"mcpmanager.agents" = ["*.toml"]
+"mcpmanager.catalog" = ["*.json"]

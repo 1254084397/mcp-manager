@@ -135,6 +135,13 @@ class HttpHandshakeTests(unittest.TestCase):
                 process.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 process.kill()
+                process.wait(timeout=3)
+            for stream in (process.stdin, process.stdout, process.stderr):
+                try:
+                    if stream:
+                        stream.close()
+                except OSError:
+                    pass
 
     def test_http_initialize_and_tools(self) -> None:
         result = self.probe("ok")
