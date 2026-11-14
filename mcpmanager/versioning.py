@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 import urllib.request
 from typing import Any
 
@@ -43,14 +44,46 @@ def npm_latest(package: str) -> str:
     return lines[-1]
 
 
+def _pypi_bases() -> list[str]:
+    """Official PyPI first, then pip/uv mirrors from the environment."""
+    bases: list[str] = []
+    for key in ("PIP_INDEX_URL", "UV_INDEX_URL", "UV_DEFAULT_INDEX", "PIP_INDEX"):
+        value = os.environ.get(key, "").strip()
+        if not value.startswith("http"):
+            continue
+        base = value.split()[0].rstrip("/")
+        if base.endswith("/simple"):
+            base = base[: -len("/simple")]
+        bases.append(base)
+    bases.extend(("https://pypi.org", "https://pypi.tuna.tsinghua.edu.cn"))
+    unique: list[str] = []
+    for base in bases:
+        if base not in unique:
+            unique.append(base)
+    return unique
+
+
 def pypi_latest(package: str) -> str:
-    with urllib.request.urlopen(f"https://pypi.org/pypi/{package}/json", timeout=15) as response:
-        data = json.loads(response.read().decode("utf-8"))
-    info = data.get("info") if isinstance(data, dict) else None
-    version = info.get("version") if isinstance(info, dict) else None
-    if not version:
-        raise RuntimeError(f"PyPI 返回格式异常，未找到 {package} 的 version 字段")
-    return version
+    last_error: Exception | None = None
+    for base in _pypi_bases():
+        url = f"{base}/pypi/{package}/json"
+        for attempt in range(2):
+            try:
+                request = urllib.request.Request(url, headers={"User-Agent": "mcp-manager"})
+                with urllib.request.urlopen(request, timeout=12) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+                info = data.get("info") if isinstance(data, dict) else None
+                version = info.get("version") if isinstance(info, dict) else None
+                if version:
+                    return version
+                raise RuntimeError(f"PyPI 返回格式异常，未找到 {package} 的 version 字段")
+            except Exception as exc:  # noqa: BLE001 - try the next mirror before failing
+                last_error = exc
+                time.sleep(0.4 * (attempt + 1))
+    raise RuntimeError(
+        f"无法查询 {package} 的版本（{last_error}）。"
+        "如网络受限，可设置 PIP_INDEX_URL 指向可用镜像后重试"
+    )
 
 
 def latest_version(spec: dict[str, Any]) -> str:
@@ -87,3 +120,27 @@ def npm_install_global(package: str, version: str) -> tuple[bool, str]:
     if result.returncode != 0:
         return False, output[-1500:] or f"npm install 返回 {result.returncode}"
     return True, output[-1500:]
+
+
+def run_custom_update(command: str) -> tuple[bool, str]:
+    """Run a user supplied upgrade command (git pull, pip install -U, ...)."""
+    command = command.strip()
+    if not command:
+        return False, "更新命令为空"
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=600,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except Exception as exc:  # noqa: BLE001 - surfaced to the UI
+        return False, str(exc)
+    output = ((result.stdout or "") + (result.stderr or "")).strip()
+    if result.returncode != 0:
+        return False, output[-2000:] or f"命令返回 {result.returncode}"
+    return True, output[-2000:]

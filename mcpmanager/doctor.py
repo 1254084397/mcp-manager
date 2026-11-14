@@ -38,15 +38,25 @@ def check_url(url: str, timeout: float = 5.0) -> tuple[bool, str]:
 def diagnose_server(profile: Profile, name: str, spec: dict[str, Any], network: bool = False) -> dict[str, Any]:
     command = adapters.command_of(spec)
     url = adapters.url_of(spec, profile)
+    level = adapters.level_of(spec, profile)
     row: dict[str, Any] = {
         "name": name,
-        "transport": "remote" if url else "stdio",
+        "transport": "host" if level == "host" else ("remote" if url else "stdio"),
         "command": command or "",
         "args": adapters.args_of(spec),
         "available": None,
         "detail": "",
         "problems": [],
     }
+    if level == "host":
+        row["available"] = True
+        row["detail"] = "宿主/插件级，由 Agent 运行时提供，无需本地命令"
+        return row
+    if not command and not url:
+        row["available"] = False
+        row["detail"] = "配置缺少 command/url"
+        row["problems"].append("配置缺少 command/url")
+        return row
     if url:
         if network:
             ok, detail = check_url(url)
@@ -55,7 +65,10 @@ def diagnose_server(profile: Profile, name: str, spec: dict[str, Any], network: 
             if not ok:
                 row["problems"].append("URL 不可达")
         else:
-            row["detail"] = url
+            # Remote endpoints are valid configuration; without a network probe
+            # they must not be reported as failures.
+            row["available"] = True
+            row["detail"] = f"{url}（未做网络检查）"
         return row
     ok, detail = check_command(command)
     row["available"] = ok
@@ -73,15 +86,20 @@ def _looks_like_missing_path(arg: str) -> bool:
         return False
     text = arg.split("==", 1)[0]
     candidate = Path(text)
-    looks_like_path = candidate.is_absolute() and (candidate.suffix or "\\" in text or "/" in text)
-    return bool(looks_like_path and not candidate.exists())
+    # Directory arguments (cache dirs, workspaces) are created on demand, so only
+    # flag absolute paths that point at a file with an extension.
+    return bool(candidate.is_absolute() and candidate.suffix and not candidate.exists())
 
 
 def diagnose(profile: Profile, network: bool = False) -> list[dict[str, Any]]:
-    if not profile.path.exists():
+    if not any(path.exists() for path in profile.paths):
         raise FileNotFoundError(f"{profile.name} 配置不存在：{profile.path}")
-    section = formats.read_section(profile.path, profile.format, profile.schema)
-    return [diagnose_server(profile, name, spec, network) for name, spec in section.items() if isinstance(spec, dict)]
+    section, _sources = formats.read_merged_section(profile.paths, profile.format, profile.schema)
+    return [
+        diagnose_server(profile, name, spec, network)
+        for name, spec in section.items()
+        if isinstance(spec, dict) and not adapters.is_container(spec)
+    ]
 
 
 def environment_report() -> list[dict[str, Any]]:

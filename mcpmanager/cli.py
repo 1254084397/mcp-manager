@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import adapters, discovery, doctor, formats, paths, profiles as profiles_mod, registry, sync, versioning
+from . import adapters, discovery, doctor, formats, handshake, paths, profiles as profiles_mod, registry, sync, versioning
 
 
 def _profiles():
@@ -30,13 +30,16 @@ def _resolve_targets(values: list[str] | None) -> list:
 def _print_agents() -> None:
     print(f"{'ID':18} {'名称':20} {'状态':6} 配置")
     for profile in _profiles().values():
-        state = "OK" if profile.path.exists() else "--"
+        state = "OK" if any(path.exists() for path in profile.paths) else "--"
         print(f"{profile.id:18} {profile.name:20} {state:6} {profile.path}")
+        for extra in profile.paths[1:]:
+            mark = "存在" if extra.exists() else "缺失，自动跳过"
+            print(f"{'':18} {'':20} {'附加':6} {extra}（只读，{mark}）")
 
 
 def _print_list(agent: str) -> None:
     profile = _profile(agent)
-    section = formats.read_section(profile.path, profile.format, profile.schema)
+    section, sources = formats.read_merged_section(profile.paths, profile.format, profile.schema)
     if not section:
         print(f"{profile.name} 未配置任何 MCP：{profile.path}")
         return
@@ -47,7 +50,9 @@ def _print_list(agent: str) -> None:
             continue
         url = adapters.url_of(spec, profile)
         target = url or " ".join(filter(None, [adapters.command_of(spec), *adapters.args_of(spec)]))
-        print(f"{name:24} {'remote' if url else 'stdio':8} {target}")
+        source = sources.get(name)
+        suffix = "  [附加配置·只读]" if source and source != profile.path else ""
+        print(f"{name:24} {'remote' if url else 'stdio':8} {target}{suffix}")
 
 
 def _cmd_agents(_args: argparse.Namespace) -> int:
@@ -68,7 +73,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
 
 def _cmd_scan(args: argparse.Namespace) -> int:
     data = registry.load()
-    profile_paths = [profile.path for profile in _profiles().values() if profile.path.exists()]
+    profile_paths = [path for profile in _profiles().values() for path in profile.paths if path.exists()]
     report, unknown = discovery.scan_report(data, profile_paths)
     paths.REPORT_DIR.mkdir(parents=True, exist_ok=True)
     target = paths.REPORT_DIR / "discovery-report.json"
@@ -77,7 +82,11 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0
     print(f"扫描到 {len(report['configFiles'])} 个有效配置，{len(report['discoveredServers'])} 个 MCP 名称。")
-    print("未登记：" + (", ".join(unknown) if unknown else "无"))
+    print(f"当前生效配置：{len(report['effectiveServers'])} 个 MCP；"
+          f"缓存/插件/备份：{len(report['cachedServers'])} 个 MCP。")
+    print("未登记（当前生效）：" + (", ".join(unknown) if unknown else "无"))
+    if report["unknownCached"]:
+        print("未登记（缓存/插件/备份，仅供参考）：" + ", ".join(report["unknownCached"]))
     print("报告：" + str(target))
     return 0
 
@@ -98,6 +107,30 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         for row in doctor.environment_report():
             print(f"  {row['name']:10} {'OK' if row['available'] else '--':3} {row['path']}")
     return 0
+
+
+def _cmd_probe(args: argparse.Namespace) -> int:
+    profile = _profile(args.agent)
+    section, _sources = formats.read_merged_section(profile.paths, profile.format, profile.schema)
+    if args.name:
+        if args.name not in section:
+            raise KeyError(f"{profile.name} 的配置里没有 {args.name}")
+        targets = [(args.name, section[args.name])]
+    else:
+        targets = [(name, spec) for name, spec in section.items() if isinstance(spec, dict)]
+    if not targets:
+        print(f"{profile.name} 没有可测试的 MCP。")
+        return 0
+    failures = 0
+    for name, spec in targets:
+        result = handshake.probe(profile, name, spec, timeout=args.timeout)
+        state = "OK" if result["ok"] else "FAIL"
+        print(f"{name:24} {state:4} {result['stage']:10} {result['detail']}")
+        if result["tools"]:
+            print(f"{'':24}      工具：{', '.join(result['tools'])}")
+        if not result["ok"] and not result.get("skipped"):
+            failures += 1
+    return 1 if failures else 0
 
 
 def _cmd_updates(_args: argparse.Namespace) -> int:
@@ -284,6 +317,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--network", action="store_true", help="额外探测远程 URL")
     p.add_argument("--env", action="store_true", help="显示 Node/npm/uvx 等运行时")
     p.set_defaults(func=_cmd_doctor)
+
+    p = sub.add_parser("probe", help="真实 MCP 握手测试（initialize + tools/list）")
+    p.add_argument("--agent", required=True)
+    p.add_argument("--name", help="只测试指定的 MCP")
+    p.add_argument("--timeout", type=float, default=20.0)
+    p.set_defaults(func=_cmd_probe)
 
     p = sub.add_parser("updates", help="检查可升级的包")
     p.set_defaults(func=_cmd_updates)

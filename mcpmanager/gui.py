@@ -18,7 +18,7 @@ import traceback
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from . import __version__, adapters, discovery, doctor, formats, paths, profiles, registry, sync, versioning
+from . import __version__, adapters, discovery, doctor, formats, handshake, paths, profiles, registry, sync, versioning
 
 FONT = "Microsoft YaHei UI"
 MONO = "Consolas"
@@ -472,7 +472,7 @@ class App:
             selected = profile_id == self.agent_id
             background = colors["sidebar_active"] if selected else colors["sidebar"]
             row["row"].configure(bg=background)
-            row["dot"].configure(bg=background, fg=colors["ok"] if self.profiles[profile_id].path.exists() else colors["muted"])
+            row["dot"].configure(bg=background, fg=colors["ok"] if any(p.exists() for p in self.profiles[profile_id].paths) else colors["muted"])
             row["name"].configure(bg=background, fg="#ffffff" if selected else colors["sidebar_text"],
                                   font=(FONT, 9, "bold") if selected else (FONT, 9))
 
@@ -558,7 +558,7 @@ class App:
 
     def refresh_agents(self) -> None:
         for profile_id, profile in self.profiles.items():
-            exists = profile.path.exists()
+            exists = any(path.exists() for path in profile.paths)
             self._sidebar_rows[profile_id]["dot"].configure(fg=self.palette()["ok"] if exists else self.palette()["muted"])
         self._paint_agent_rows()
 
@@ -584,13 +584,13 @@ class App:
         profile = self.current()
         data = registry.load()
         section: dict = {}
+        sources: dict[str, Path] = {}
         error = ""
-        if profile.path.exists():
-            try:
-                section = formats.read_section(profile.path, profile.format, profile.schema)
-            except Exception as exc:  # noqa: BLE001 - shown in the hint
-                error = f"配置解析失败：{exc}"
-                self.log(error)
+        try:
+            section, sources = formats.read_merged_section(profile.paths, profile.format, profile.schema)
+        except Exception as exc:  # noqa: BLE001 - shown in the hint
+            error = f"配置解析失败：{exc}"
+            self.log(error)
 
         configured = {registry.canonical(name): name for name in section}
         rows = []
@@ -606,20 +606,45 @@ class App:
             elif here:
                 state, tag = "已配置", "ok"
             else:
-                state, tag = "注册表已登记", "registered"
+                state, tag = "注册表已登记（未安装）", "registered"
             rows.append((name, spec, state, tag, here))
 
+        ignored = 0
         for name in section:
             if registry.canonical(name) not in registered:
+                if adapters.is_container(section[name]):
+                    ignored += 1
+                    continue
                 rows.append((name, {"kind": "仅配置中发现", "agents": [profile.id]}, "已配置（未登记）", "warn", True))
 
         for name, spec, state, tag, here in rows:
             canonical = registry.canonical(name)
             live = section.get(configured[canonical], spec) if here else spec
+            level = adapters.level_of(live, profile)
+            if spec.get("kind") == "copilot-plugin-host":
+                level = "host"
+            if level == "host":
+                registered_here = registry.entry(data, name) is not None
+                state = "宿主/插件级" if registered_here else "宿主/插件级（未登记）"
+                tag = "plugin"
+            elif level == "invalid":
+                if here:
+                    state = "配置不完整" if registry.entry(data, name) is not None else "配置不完整（未登记）"
+                    tag = "warn"
+                elif spec.get("package"):
+                    # Registry-only package definition; this Agent just doesn't
+                    # have it installed yet.
+                    level = "manageable"
+                else:
+                    state, tag = "配置不完整", "warn"
             command = adapters.command_of(live)
-            if command and (Path(command).exists() or shutil.which(command)):
+            source = sources.get(configured[canonical]) if here else None
+            aux = bool(here and source and source != profile.path)
+            if level == "manageable" and aux:
+                state, tag = "已配置（附加配置·只读）", "plugin"
+            if level == "manageable" and command and (Path(command).exists() or shutil.which(command)):
                 state += " · 路径正常"
-            elif command:
+            elif level == "manageable" and command:
                 tag = "warn"
                 state += " · 路径缺失"
             field = registry.version_field(spec)
@@ -632,6 +657,10 @@ class App:
                 "tag": tag,
                 "version": version,
                 "kind": str(spec.get("kind", "")),
+                "level": level,
+                "here": here,
+                "source": str(source) if source else "",
+                "aux": aux,
             }
 
         needle = self.search_var.get().strip().lower()
@@ -654,16 +683,19 @@ class App:
 
         if error:
             self.hint.configure(text=error, fg=self.palette()["danger"])
-        elif not profile.path.exists():
+        elif not any(path.exists() for path in profile.paths):
             self.hint.configure(
                 text=f"{profile.name} 还没有配置文件：{profile.path}  ·  可在“操作”菜单中初始化配置。",
                 fg=self.palette()["warn"],
             )
         else:
-            self.hint.configure(
-                text=f"{profile.name}  ·  {profile.path}  ·  已配置 {len(section)} 项",
-                fg=self.palette()["muted"],
-            )
+            extra = [str(path) for path in profile.paths[1:] if path.exists()]
+            text = f"{profile.name}  ·  {profile.path}  ·  已配置 {len(section)} 项"
+            if extra:
+                text += "  ·  附加只读：" + "，".join(extra)
+            self.hint.configure(text=text, fg=self.palette()["muted"])
+        if ignored and not error:
+            self.hint.configure(text=self.hint.cget("text") + f"  ·  已忽略 {ignored} 个非 MCP 条目")
         self.status_right.configure(text=f"{profile.name} · 显示 {len(self.tree.get_children())} / {len(self.rows)} 项")
 
     def sort_by(self, column: str) -> None:
@@ -694,10 +726,15 @@ class App:
         profile = self.current()
         live = row["live"]
         spec = row["spec"]
+        level = row.get("level", "manageable")
+        level_text = {"manageable": "可管理", "host": "宿主/插件级（不可登记）",
+                      "invalid": "配置不完整"}.get(level, "可管理")
         lines = [
             f"名称        {row['name']}",
             f"状态        {row['state']}",
             f"注册表      {'已登记' if spec.get('kind') != '仅配置中发现' else '未登记'}",
+            f"管理级别    {level_text}",
+            f"本机配置    {'已写入当前 Agent' if row.get('here') else '未安装（仅注册表登记）'}",
             f"类型        {row['kind'] or '-'}",
         ]
         command = adapters.command_of(live)
@@ -715,7 +752,11 @@ class App:
             for key, value in env.items():
                 secret = any(marker in str(key).lower() for marker in adapters.SECRET_MARKERS)
                 lines.append(f"  {key} = {'***' if secret else value}")
-        lines.append(f"来源        {profile.path}")
+        update_command = str(spec.get("updateCommand") or "")
+        if update_command:
+            lines.append(f"更新命令    {update_command}")
+        source = row.get("source") or str(profile.path)
+        lines.append(f"来源文件    {source}" + ("（附加配置·只读）" if row.get("aux") else ""))
         return "\n".join(lines)
 
     def _set_details(self, text: str) -> None:
@@ -738,20 +779,37 @@ class App:
         self.tree.selection_set(item)
         name = self.tree.item(item, "values")[0]
         profile = self.current()
+        row = self.rows.get(name) or {}
+        level = str(row.get("level", "invalid"))
+        manageable = level == "manageable"
+        live = row.get("live") or {}
+        has_target = bool(adapters.command_of(live) or adapters.url_of(live, profile))
+        if manageable:
+            register_label = "登记到主注册表…"
+        elif level == "host":
+            register_label = "宿主/插件级（不可登记）"
+        else:
+            register_label = "配置不完整（无法登记）"
         registered = registry.entry(registry.load(), name) is not None
         menu = tk.Menu(self.root, tearoff=0)
         colors = self.palette()
         menu.configure(bg=colors["surface"], fg=colors["text"], activebackground=colors["accent"],
                        activeforeground="#ffffff", bd=0)
-        menu.add_command(label="复制启动命令", command=self.copy_command)
-        menu.add_command(label="诊断此 MCP", command=lambda: self.diagnose_one(name))
+        menu.add_command(label="复制启动命令", command=self.copy_command,
+                         state="normal" if manageable and has_target else "disabled")
+        menu.add_command(label="诊断此 MCP", command=lambda: self.diagnose_one(name),
+                         state="normal" if has_target or level == "host" else "disabled")
+        menu.add_command(label="运行握手测试", command=lambda: self.handshake_one(name),
+                         state="normal" if manageable and has_target else "disabled")
         menu.add_separator()
-        menu.add_command(label="登记到主注册表…", command=lambda: self.register_server(name),
-                         state="disabled" if registered else "normal")
+        menu.add_command(label=register_label, command=lambda: self.register_server(name),
+                         state="normal" if manageable and not registered else "disabled")
         menu.add_command(label="修改版本登记", command=self.edit_version,
-                         state="normal" if registered else "disabled")
+                         state="normal" if manageable and registered else "disabled")
+        menu.add_command(label="设置更新命令…", command=self.edit_update_command,
+                         state="normal" if manageable and registered else "disabled")
         menu.add_command(label="更新此 MCP", command=self.update_selected,
-                         state="normal" if registered else "disabled")
+                         state="normal" if manageable and registered else "disabled")
         menu.add_command(label="从注册表移除", command=lambda: self.remove_server(name),
                          state="normal" if registered else "disabled")
         menu.add_separator()
@@ -789,10 +847,8 @@ class App:
         wanted = registry.canonical(name)
         agents = []
         for profile in self.profiles.values():
-            if not profile.path.exists():
-                continue
             try:
-                section = formats.read_section(profile.path, profile.format, profile.schema)
+                section, _sources = formats.read_merged_section(profile.paths, profile.format, profile.schema)
             except Exception:  # noqa: BLE001 - unreadable profiles are skipped
                 continue
             if any(registry.canonical(item) == wanted for item in section):
@@ -807,6 +863,19 @@ class App:
         row = self.rows.get(name)
         if not row or not isinstance(row["live"], dict):
             messagebox.showerror("无法登记", f"没有读到 {name} 的配置内容。", parent=self.root)
+            return
+        level = row.get("level") or adapters.level_of(row["live"], self.current())
+        if level == "host":
+            messagebox.showinfo(
+                "宿主/插件级",
+                f"{name} 由 Agent 运行时提供，不在本地安装，无法通过注册表管理。",
+                parent=self.root,
+            )
+            return
+        if level != "manageable":
+            messagebox.showerror(
+                "无法登记", f"{name} 的配置缺少有效的 command 或 url，无法登记。", parent=self.root
+            )
             return
         profile = self.current()
         live = row["live"]
@@ -891,6 +960,41 @@ class App:
         if result["problems"]:
             text += "\n问题：\n- " + "\n- ".join(result["problems"])
         messagebox.showinfo("诊断结果", text, parent=self.root)
+
+    def handshake_one(self, name: str) -> None:
+        row = self.rows.get(name)
+        if not row:
+            return
+        profile = self.current()
+        live = row["live"]
+
+        def work():
+            return handshake.probe(profile, name, live)
+
+        def done(result) -> None:
+            if result["ok"]:
+                state = "成功"
+            elif result.get("skipped"):
+                state = "跳过"
+            else:
+                state = "失败"
+            stage = {"config": "配置", "start": "启动", "initialize": "初始化",
+                     "tools": "工具列表", "ready": "就绪"}.get(result["stage"], result["stage"])
+            text = f"{name}\n状态：{state}\n阶段：{stage}\n详情：{result['detail']}"
+            info = result.get("serverInfo") or {}
+            if info:
+                text += f"\n服务：{info.get('name', '')} {info.get('version', '')}".rstrip()
+            if result.get("protocolVersion"):
+                text += f"\n协议：{result['protocolVersion']}"
+            if result["tools"]:
+                text += "\n工具：\n- " + "\n- ".join(result["tools"])
+            self.log(f"握手测试 {name}：{state}（{result['detail']}）")
+            if result["ok"]:
+                messagebox.showinfo("握手测试", text, parent=self.root)
+            else:
+                messagebox.showwarning("握手测试", text, parent=self.root)
+
+        self.run_task(f"正在握手测试 {name}…", work, done)
 
     def remove_server(self, name: str) -> None:
         data = registry.load()
@@ -1222,9 +1326,26 @@ class App:
         if spec is None:
             messagebox.showerror("未登记", f"{name} 只在 Agent 配置中发现，不在主注册表中。", parent=self.root)
             return
+        command = str(spec.get("updateCommand") or "").strip()
+        if command:
+            if not messagebox.askyesno(
+                "执行更新命令", f"{name}\n\n将执行：\n{command}\n\n继续吗？", parent=self.root
+            ):
+                return
+            self.run_task(
+                f"正在更新 {name}…",
+                lambda: versioning.run_custom_update(command),
+                lambda result: self._after_custom_update(name, result),
+            )
+            return
         package, field = spec.get("package"), registry.version_field(spec)
         if not package or not field:
-            messagebox.showinfo("无法自动更新", f"{name} 不是包管理器安装的 MCP。", parent=self.root)
+            messagebox.showinfo(
+                "没有更新方式",
+                f"{name} 没有可自动更新的版本登记。\n\n"
+                "可在右键菜单选择“设置更新命令…”，填入 git pull、pip install -U 等命令后再更新。",
+                parent=self.root,
+            )
             return
         self.run_task(
             f"正在查询 {name} 的最新版本…",
@@ -1294,6 +1415,52 @@ class App:
             messagebox.showinfo("更新完成", f"{name} 已更新到 {latest}。候选生成失败：{exc}", parent=self.root)
         self.refresh_all()
 
+    def _after_custom_update(self, name: str, result) -> None:
+        ok, detail = result
+        if detail:
+            self.log(detail[-2000:])
+        if not ok:
+            messagebox.showerror("更新失败", f"{name} 的更新命令执行失败，详情见日志。", parent=self.root)
+            return
+        messagebox.showinfo(
+            "更新完成",
+            f"{name} 的更新命令已执行完成。\n如路径或版本有变化，可用“修改版本登记”记录。",
+            parent=self.root,
+        )
+        self.refresh_all()
+
+    def edit_update_command(self) -> None:
+        name = self.selected_name()
+        if not name:
+            return
+        data = registry.load()
+        spec = registry.entry(data, name)
+        if spec is None:
+            messagebox.showinfo("未登记", f"{name} 不在主注册表中，请先登记。", parent=self.root)
+            return
+        current = str(spec.get("updateCommand") or "")
+        command = simpledialog.askstring(
+            "设置更新命令",
+            f"输入 {name} 的升级命令（留空清除）：\n"
+            "例如：git -C D:/AI/laya pull\n"
+            "或：D:/AI/laya/.venv/Scripts/python.exe -m pip install -U 包名",
+            initialvalue=current,
+            parent=self.root,
+        )
+        if command is None:
+            return
+        command = command.strip()
+        if command:
+            spec["updateCommand"] = command
+        else:
+            spec.pop("updateCommand", None)
+        registry.save(data)
+        self.refresh_servers()
+        if command:
+            self.log(f"{name} 的更新命令已设置：{command}")
+        else:
+            self.log(f"{name} 的更新命令已清除。")
+
     def edit_version(self) -> None:
         name = self.selected_name()
         if not name:
@@ -1305,8 +1472,10 @@ class App:
             return
         field = registry.version_field(spec)
         if not field:
-            messagebox.showinfo("无版本字段", f"{name} 没有可编辑的版本字段。", parent=self.root)
-            return
+            if spec.get("package"):
+                messagebox.showinfo("无版本字段", f"{name} 没有可编辑的版本字段。", parent=self.root)
+                return
+            field = "installedVersion"
         value = simpledialog.askstring("设置版本", f"输入 {name} 的版本：", initialvalue=spec.get(field, ""),
                                        parent=self.root)
         if not value or not value.strip():
@@ -1463,7 +1632,7 @@ class App:
     def scan_all(self) -> None:
         def work():
             data = registry.load()
-            profile_paths = [profile.path for profile in self.profiles.values()]
+            profile_paths = [path for profile in self.profiles.values() for path in profile.paths]
             report, unknown = discovery.scan_report(data, profile_paths)
             target = paths.REPORT_DIR / "discovery-report.json"
             target.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -1473,13 +1642,38 @@ class App:
 
     def _show_scan(self, payload) -> None:
         report, unknown, target = payload
+        effective = report.get("effectiveServers", {})
+        cached = report.get("cachedServers", {})
         self.log(f"扫描到 {len(report['configFiles'])} 个有效配置，{len(report['discoveredServers'])} 个 MCP 名称。")
-        self.log("未登记 MCP：" + (", ".join(unknown) if unknown else "无"))
+        self.log(f"当前生效：{len(effective)} 个；缓存/插件/备份：{len(cached)} 个。")
+        self.log("未登记（当前生效）：" + (", ".join(unknown) if unknown else "无"))
+        if report.get("unknownCached"):
+            self.log("未登记（缓存/插件/备份）：" + ", ".join(report["unknownCached"]))
         self.log("报告：" + str(target))
+
+        lines = [
+            f"配置文件：{len(report['configFiles'])} 个",
+            f"当前生效配置：{len(effective)} 个 MCP",
+            f"用户配置：{len(report.get('userServers', {}))} 个 MCP",
+            f"缓存/插件/备份：{len(cached)} 个 MCP",
+        ]
+        counts: dict[str, int] = {}
+        for item in report["configFiles"]:
+            counts[item["level"]] = counts.get(item["level"], 0) + 1
+            if item["effective"]:
+                self.log(f"生效配置：{item['path']}")
+        if counts:
+            lines += ["", "配置来源分级：", *[f"  {level}：{count} 个" for level, count in counts.items()]]
         if unknown:
-            messagebox.showwarning("发现未登记 MCP", "发现未登记 MCP：\n" + "\n".join(unknown), parent=self.root)
+            lines += ["", "当前生效但未登记：", *[f"  - {name}" for name in unknown]]
+        if report.get("unknownCached"):
+            lines += ["", "仅在缓存/插件/备份中发现（仅供参考）：",
+                      *[f"  - {name}" for name in report["unknownCached"]]]
+        lines += ["", f"报告：{target}"]
+        if unknown:
+            messagebox.showwarning("扫描完成", "\n".join(lines), parent=self.root)
         else:
-            messagebox.showinfo("扫描完成", "未发现主注册表之外的 MCP。", parent=self.root)
+            messagebox.showinfo("扫描完成", "\n".join(lines), parent=self.root)
 
     def add_scan_folder(self) -> None:
         from tkinter import filedialog

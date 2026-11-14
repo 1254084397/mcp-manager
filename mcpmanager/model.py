@@ -16,6 +16,7 @@ class Profile:
     id: str
     name: str
     config: str
+    configs: list[str] = field(default_factory=list)
     format: str = "json"
     schema: str = "mcpServers"
     command: str = "string"  # "string" | "array"
@@ -36,6 +37,16 @@ class Profile:
         return paths.expand_path(self.config)
 
     @property
+    def paths(self) -> list[Path]:
+        """Primary config first, then optional read-only auxiliary configs."""
+        result = [self.path]
+        for item in self.configs:
+            candidate = paths.expand_path(item)
+            if candidate not in result:
+                result.append(candidate)
+        return result
+
+    @property
     def display_path(self) -> str:
         return str(self.path)
 
@@ -44,6 +55,8 @@ class Profile:
         return wanted in {self.id.lower(), self.name.lower(), *(a.lower() for a in self.aliases)}
 
     def __post_init__(self) -> None:
+        if isinstance(self.configs, str):
+            self.configs = [self.configs]
         if self.format not in {"json", "jsonc", "toml"}:
             raise ValueError(f"{self.id}: unsupported format {self.format!r}")
         if self.command not in {"string", "array"}:

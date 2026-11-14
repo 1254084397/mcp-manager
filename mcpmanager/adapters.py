@@ -123,6 +123,38 @@ def url_of(spec: dict[str, Any], profile: Profile) -> str | None:
     return None
 
 
+# Commands living under these runtime/plugin folders are provided by the Agent
+# itself; they are not installed or upgraded through the registry.
+HOST_PATH_MARKERS = (
+    "/openai/codex/runtimes/",
+    "/codex-runtimes/",
+    "/agentplugins/",
+)
+
+
+def is_container(spec: Any) -> bool:
+    """True for nested wrappers such as ``{"servers": {...}}``, not real MCPs."""
+    if not isinstance(spec, dict) or command_of(spec) or spec.get("url") or spec.get("type"):
+        return False
+    return any(isinstance(value, dict) for value in spec.values())
+
+
+def level_of(spec: dict[str, Any], profile: Profile) -> str:
+    """Classify a live entry: ``manageable``, ``host`` or ``invalid``."""
+    if spec.get("kind") == "copilot-plugin-host":
+        return "host"
+    command = command_of(spec)
+    url = url_of(spec, profile)
+    if command:
+        path = str(command).replace("\\", "/").lower()
+        if any(marker in path for marker in HOST_PATH_MARKERS):
+            return "host"
+        return "manageable"
+    if url:
+        return "manageable"
+    return "invalid"
+
+
 def has_inline_secret(value: Any, key: str = "") -> bool:
     if any(marker in key.lower() for marker in SECRET_MARKERS):
         return True

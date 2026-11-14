@@ -90,6 +90,34 @@ def read_section(path: Path, fmt: str, schema: str) -> dict[str, Any]:
     return section
 
 
+def read_merged_section(
+    paths: list[Path], fmt: str, schema: str
+) -> tuple[dict[str, Any], dict[str, Path]]:
+    """Merge one Agent's configs, primary first, and remember each source.
+
+    Auxiliary configs are read-only: they may contribute servers that the main
+    config does not define, but the primary file always wins on conflicts. A
+    missing auxiliary file is skipped; a broken primary file still raises.
+    """
+    merged: dict[str, Any] = {}
+    sources: dict[str, Path] = {}
+    for index, path in enumerate(paths):
+        if not path.exists():
+            continue
+        try:
+            section = read_section(path, fmt, schema)
+        except Exception:
+            if index == 0:
+                raise
+            continue
+        for name, spec in section.items():
+            if name in merged:
+                continue
+            merged[name] = spec
+            sources[name] = path
+    return merged, sources
+
+
 # --------------------------------------------------------------------------- #
 # JSON block replacement
 # --------------------------------------------------------------------------- #
