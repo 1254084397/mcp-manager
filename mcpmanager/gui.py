@@ -6,6 +6,7 @@ this module only renders whatever the core reports.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import json
 import os
@@ -15,13 +16,34 @@ import threading
 import tkinter as tk
 import traceback
 from pathlib import Path
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from . import __version__, adapters, discovery, doctor, formats, paths, profiles, registry, sync, versioning
 
 FONT = "Microsoft YaHei UI"
 MONO = "Consolas"
 REPO_URL = "https://github.com/1254084397/mcp-manager"
+
+
+def _package_token(args: list[str], separator: str) -> tuple[str | None, str | None]:
+    """Pick the package (and inline version) from a package-runner argument list."""
+    for item in args:
+        token = str(item)
+        if not token or token.startswith("-"):
+            continue
+        if separator == "@":
+            if token.startswith("@"):
+                scope, slash, rest = token.partition("/")
+                if not slash:
+                    return token, None
+                package, _, version = rest.partition("@")
+                return f"{scope}/{package}", version or None
+            package, _, version = token.partition("@")
+            return package, version or None
+        package, _, version = token.partition(separator)
+        return package, version or None
+    return None, None
+
 
 LIGHT = {
     "bg": "#f1f5f9",
@@ -233,6 +255,7 @@ class App:
         action_menu.add_command(label="备份管理…", command=self.open_backup_manager)
         action_menu.add_separator()
         action_menu.add_command(label="初始化当前 Agent 配置", command=self.init_config)
+        action_menu.add_command(label="修改当前 Agent 配置位置…", command=self.edit_profile_path)
         action_menu.add_command(label="生成候选配置", command=self.generate_candidate)
         action_menu.add_command(label="应用候选…", command=self.show_candidate_preview)
         self.menubar.add_cascade(label="操作", menu=action_menu)
@@ -330,6 +353,7 @@ class App:
             ("备份全部", self.backup_all, "ghost"),
             ("应用候选…", self.show_candidate_preview, "ghost"),
             ("生成候选", self.generate_candidate, "accent"),
+            ("配置位置", self.edit_profile_path, "ghost"),
         ):
             button = self._button(toolbar, text, command, kind)
             button.pack(side="right", padx=(6, 0))
@@ -714,6 +738,7 @@ class App:
         self.tree.selection_set(item)
         name = self.tree.item(item, "values")[0]
         profile = self.current()
+        registered = registry.entry(registry.load(), name) is not None
         menu = tk.Menu(self.root, tearoff=0)
         colors = self.palette()
         menu.configure(bg=colors["surface"], fg=colors["text"], activebackground=colors["accent"],
@@ -721,9 +746,14 @@ class App:
         menu.add_command(label="复制启动命令", command=self.copy_command)
         menu.add_command(label="诊断此 MCP", command=lambda: self.diagnose_one(name))
         menu.add_separator()
-        menu.add_command(label="修改版本登记", command=self.edit_version)
-        menu.add_command(label="更新此 MCP", command=self.update_selected)
-        menu.add_command(label="从注册表移除", command=lambda: self.remove_server(name))
+        menu.add_command(label="登记到主注册表…", command=lambda: self.register_server(name),
+                         state="disabled" if registered else "normal")
+        menu.add_command(label="修改版本登记", command=self.edit_version,
+                         state="normal" if registered else "disabled")
+        menu.add_command(label="更新此 MCP", command=self.update_selected,
+                         state="normal" if registered else "disabled")
+        menu.add_command(label="从注册表移除", command=lambda: self.remove_server(name),
+                         state="normal" if registered else "disabled")
         menu.add_separator()
         menu.add_command(label="打开 Agent 配置", command=self.open_selected_config)
         menu.add_command(label="打开所在目录", command=lambda: self._open(profile.path.parent))
@@ -731,6 +761,103 @@ class App:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
+
+    @staticmethod
+    def _registration_meta(command: str | None, args: list[str],
+                           url: str | None) -> tuple[str, str | None, str | None]:
+        """Infer registry ``kind``/``package``/``version`` from a live entry."""
+        if not command:
+            return ("remote-http" if url else "local-binary"), None, None
+        exe = Path(command).name.lower()
+        for suffix in (".exe", ".cmd", ".bat"):
+            if exe.endswith(suffix):
+                exe = exe[: -len(suffix)]
+                break
+        if exe in {"npx", "bunx"}:
+            package, version = _package_token(args, "@")
+            return "npm-on-demand", package, version
+        if exe == "uvx":
+            package, version = _package_token(args, "==")
+            return "uv-on-demand", package, version
+        if exe.startswith("python"):
+            return "local-python", None, None
+        if exe == "node":
+            return "local-node", None, None
+        return "local-binary", None, None
+
+    def _agents_with_server(self, name: str) -> list[str]:
+        wanted = registry.canonical(name)
+        agents = []
+        for profile in self.profiles.values():
+            if not profile.path.exists():
+                continue
+            try:
+                section = formats.read_section(profile.path, profile.format, profile.schema)
+            except Exception:  # noqa: BLE001 - unreadable profiles are skipped
+                continue
+            if any(registry.canonical(item) == wanted for item in section):
+                agents.append(profile.id)
+        return agents or [self.current().id]
+
+    def register_server(self, name: str) -> None:
+        data = registry.load()
+        if registry.entry(data, name) is not None:
+            messagebox.showinfo("已登记", f"{name} 已经在主注册表中。", parent=self.root)
+            return
+        row = self.rows.get(name)
+        if not row or not isinstance(row["live"], dict):
+            messagebox.showerror("无法登记", f"没有读到 {name} 的配置内容。", parent=self.root)
+            return
+        profile = self.current()
+        live = row["live"]
+        command = adapters.command_of(live)
+        args = adapters.args_of(live)
+        url = adapters.url_of(live, profile)
+        kind, package, version = self._registration_meta(command, args, url)
+        env = live.get(profile.env) or live.get("env") or live.get("environment")
+
+        spec: dict = {"kind": kind}
+        if command:
+            spec["command"] = command
+            if args:
+                spec["args"] = args
+        if url:
+            spec["url"] = url
+        if isinstance(env, dict) and env:
+            spec["env"] = env
+        secret_keys = (
+            [str(key) for key in env if adapters.has_inline_secret(env[key], str(key))]
+            if isinstance(env, dict) else []
+        )
+        if package:
+            spec["package"] = package
+            spec["versionPolicy"] = "pin-before-sync"
+            spec["version"] = version or ""
+        spec["agents"] = self._agents_with_server(name)
+
+        lines = [f"将 {name} 登记到主注册表：", "", f"类型      {kind}"]
+        if command:
+            lines.append(f"命令      {command}")
+        if args:
+            lines.append(f"参数      {' '.join(args)}")
+        if url:
+            lines.append(f"地址      {url}")
+        if isinstance(env, dict) and env:
+            lines.append(f"环境变量  {len(env)} 项（{', '.join(env)}）")
+        if secret_keys:
+            lines.append(f"注意      {'、'.join(secret_keys)} 疑似凭据，将以明文写入 {paths.REGISTRY_PATH}")
+        if package:
+            lines.append(f"包        {package}{'@' + version if version else '（版本未登记）'}")
+        lines.append(f"适用      {', '.join(spec['agents'])}")
+        lines.append("")
+        lines.append("登记后即可使用更新、版本、移除等管理功能；不会修改 Agent 配置。")
+        if not messagebox.askyesno("登记到主注册表", "\n".join(lines), parent=self.root):
+            return
+        registry.add_server(data, name, spec)
+        registry.save(data)
+        self.log(f"已登记 {name}（{kind}），适用 Agent：{', '.join(spec['agents'])}。")
+        self.refresh_servers()
+        messagebox.showinfo("登记完成", f"{name} 已登记到主注册表，现在可通过右键菜单管理。", parent=self.root)
 
     def copy_command(self) -> None:
         name = self.tree.selection()
@@ -882,6 +1009,151 @@ class App:
         self.log(f"已创建 {profile.name} 配置：{profile.path}")
         self.refresh_all()
         self._open(profile.path)
+
+    def edit_profile_path(self) -> None:
+        profile = self.current()
+        colors = self.palette()
+        window = tk.Toplevel(self.root)
+        window.title(f"配置位置 - {profile.name}")
+        window.geometry("760x310")
+        window.resizable(False, False)
+        window.configure(bg=colors["bg"])
+        window.transient(self.root)
+        window.grab_set()
+
+        tk.Label(window, text="配置文件位置", bg=colors["bg"], fg=colors["text"],
+                 font=(FONT, 13, "bold")).pack(anchor="w", padx=20, pady=(16, 2))
+        source = "本机覆盖" if Path(profile.source).resolve().parent == paths.USER_PROFILE_DIR.resolve() else "内置配置"
+        tk.Label(window, text=f"{profile.name} · {profile.format} / {profile.schema} · {source}",
+                 bg=colors["bg"], fg=colors["muted"], font=(FONT, 9)).pack(anchor="w", padx=20)
+
+        row = tk.Frame(window, bg=colors["bg"])
+        row.pack(fill="x", padx=20, pady=(14, 8))
+        value = tk.StringVar(value=str(profile.path))
+        entry = tk.Entry(
+            row, textvariable=value, relief="flat", font=(MONO, 9), bg=colors["surface"],
+            fg=colors["text"], insertbackground=colors["text"], highlightthickness=1,
+            highlightbackground=colors["border"], highlightcolor=colors["accent"],
+        )
+        entry.pack(side="left", fill="x", expand=True, ipady=6)
+
+        def browse() -> None:
+            parent_dir = profile.path.parent
+            chosen = filedialog.askopenfilename(
+                title="选择配置文件", parent=window,
+                initialdir=str(parent_dir if parent_dir.exists() else paths.HOME),
+                filetypes=[("JSON", "*.json"), ("JSONC", "*.jsonc"), ("TOML", "*.toml"), ("所有文件", "*.*")],
+            )
+            if chosen:
+                value.set(chosen.replace("\\", "/"))
+
+        tk.Button(
+            row, text="浏览…", command=browse, relief="flat", bd=0, padx=12, pady=6,
+            bg=colors["surface"], fg=colors["text"], activebackground=colors["surface2"],
+            font=(FONT, 9), cursor="hand2",
+        ).pack(side="left", padx=(8, 0))
+
+        tk.Label(
+            window,
+            text="可填绝对路径（如 E:/CodexHome/config.toml），也可用 {home}、{appdata} 占位符。\n"
+                 "保存会写入 local/agents/<id>.toml，只影响本机，不改内置配置。",
+            bg=colors["bg"], fg=colors["muted"], font=(FONT, 9), justify="left",
+        ).pack(anchor="w", padx=20)
+
+        actions = tk.Frame(window, bg=colors["bg"])
+        actions.pack(fill="x", padx=20, side="bottom", pady=16)
+
+        def save() -> None:
+            new_config = value.get().strip().replace("\\", "/")
+            if not new_config:
+                messagebox.showerror("路径为空", "请填写配置文件路径。", parent=window)
+                return
+            target = paths.expand_path(new_config)
+            if not target.exists() and not messagebox.askyesno(
+                "文件不存在", f"{target}\n\n该文件当前不存在，仍要保存吗？", parent=window
+            ):
+                return
+            fmt = {".json": "json", ".jsonc": "jsonc", ".toml": "toml"}.get(target.suffix.lower(), profile.format)
+            updated = dataclasses.replace(profile, config=new_config, format=fmt)
+            try:
+                file = self._write_profile_override(updated)
+            except Exception as exc:  # noqa: BLE001 - surfaced to the user
+                messagebox.showerror("保存失败", str(exc), parent=window)
+                return
+            self.profiles = profiles.load_profiles(reload=True)
+            if profile.id not in self.profiles:
+                messagebox.showerror("加载失败", f"覆盖文件写入后无法加载：\n{file}", parent=window)
+                return
+            window.destroy()
+            self.refresh_agents()
+            self.refresh_servers()
+            self.log(f"{profile.name} 配置位置已改为 {updated.path}（覆盖：{file}）")
+            messagebox.showinfo("已保存", f"配置位置已更新：\n{updated.path}", parent=self.root)
+
+        def restore() -> None:
+            file = paths.USER_PROFILE_DIR / f"{profile.id}.toml"
+            if not file.exists():
+                messagebox.showinfo("已是内置配置", f"{profile.name} 当前没有被本机覆盖。", parent=window)
+                return
+            if not messagebox.askyesno(
+                "恢复默认",
+                f"删除本机覆盖并回到内置路径？\n\n{file}\n\n删除前请确认没有自定义别名或备注需要保留。",
+                parent=window,
+            ):
+                return
+            file.unlink()
+            self.profiles = profiles.load_profiles(reload=True)
+            window.destroy()
+            self.refresh_agents()
+            self.refresh_servers()
+            self.log(f"已删除 {profile.name} 的本机覆盖，恢复内置配置。")
+
+        tk.Button(
+            actions, text="保存", command=save, relief="flat", bd=0, padx=16, pady=7,
+            bg=colors["accent"], fg="#ffffff", activebackground=colors["accent_hover"],
+            activeforeground="#ffffff", font=(FONT, 9), cursor="hand2",
+        ).pack(side="right")
+        tk.Button(
+            actions, text="取消", command=window.destroy, relief="flat", bd=0, padx=14, pady=7,
+            bg=colors["surface"], fg=colors["text"], activebackground=colors["surface2"],
+            font=(FONT, 9), cursor="hand2",
+        ).pack(side="right", padx=8)
+        tk.Button(
+            actions, text="恢复默认", command=restore, relief="flat", bd=0, padx=14, pady=7,
+            bg=colors["surface"], fg=colors["muted"], activebackground=colors["surface2"],
+            font=(FONT, 9), cursor="hand2",
+        ).pack(side="left")
+        entry.focus_set()
+        entry.icursor("end")
+
+    @staticmethod
+    def _write_profile_override(profile) -> Path:
+        paths.USER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        file = paths.USER_PROFILE_DIR / f"{profile.id}.toml"
+
+        def quote(value) -> str:
+            return json.dumps(str(value), ensure_ascii=False)
+
+        lines = [
+            f"id = {quote(profile.id)}",
+            f"name = {quote(profile.name)}",
+            f"config = {quote(profile.config)}",
+            f"format = {quote(profile.format)}",
+            f"schema = {quote(profile.schema)}",
+            f"command = {quote(profile.command)}",
+            f"env = {quote(profile.env)}",
+            f"transport = {quote(profile.transport)}",
+            f"stdio_type = {quote(profile.stdio_type)}",
+            f"http_type = {quote(profile.http_type)}",
+            f"url_key = {quote(profile.url_key)}",
+            f"enabled = {'true' if profile.enabled else 'false'}",
+            f"tools = {'true' if profile.tools else 'false'}",
+            f"readonly = {'true' if profile.readonly else 'false'}",
+            "aliases = [" + ", ".join(quote(alias) for alias in profile.aliases) + "]",
+            f"notes = {quote(profile.notes)}",
+        ]
+        file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return file
 
     # ---------------------------------------------------------------- versions
     def check_updates(self) -> None:
