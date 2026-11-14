@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcp-manager"
-version = "1.1.1"
+version = "1.2.0"
 description = "Agent-agnostic MCP configuration manager: scan, sync, diagnose and upgrade MCP servers across AI agents"
 readme = "README.md"
 requires-python = ">=3.11"

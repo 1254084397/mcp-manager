@@ -49,8 +49,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         message = self._body()
-        if self.mode == "401":
-            self.send_response(401)
+        if self.mode in {"401", "403"}:
+            self.send_response(401 if self.mode == "401" else 403)
             self.end_headers()
             return
         if message.get("id") is None:
@@ -58,6 +58,13 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         method = message.get("method")
+        if method == "initialize" and self.mode == "protocol-error":
+            self._send_json({
+                "jsonrpc": "2.0",
+                "id": message["id"],
+                "error": {"code": -32600, "message": "invalid request"},
+            })
+            return
         if method == "initialize":
             result = {
                 "protocolVersion": "2024-11-05",

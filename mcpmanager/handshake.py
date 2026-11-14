@@ -191,14 +191,12 @@ def _probe_stdio(
                 line = lines.get(timeout=0.4)
             except queue.Empty:
                 if process.poll() is not None and lines.empty():
-                    raise ProbeError(
-                        STAGE_INITIALIZE,
-                        "start",
-                        "MCP 进程提前退出" + _stderr_hint(stderr),
-                    )
+                    detail = "MCP 进程提前退出" + _stderr_hint(stderr)
+                    raise ProbeError(STAGE_INITIALIZE, classify_failure(detail), detail)
                 continue
             if line is None:
-                raise ProbeError(STAGE_INITIALIZE, "start", "MCP 进程已关闭输出" + _stderr_hint(stderr))
+                detail = "MCP 进程已关闭输出" + _stderr_hint(stderr)
+                raise ProbeError(STAGE_INITIALIZE, classify_failure(detail), detail)
             text = line.strip()
             if not text:
                 continue

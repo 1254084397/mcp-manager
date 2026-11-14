@@ -70,6 +70,19 @@ class StdioHandshakeTests(unittest.TestCase):
         self.assertEqual(result["stage"], handshake.STAGE_INITIALIZE)
         self.assertIn("超时", result["detail"])
 
+    def test_protocol_error(self) -> None:
+        result = handshake.probe(self.profile, "fake", self.spec("protocol-error"), timeout=5)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["stage"], handshake.STAGE_INITIALIZE)
+        self.assertIn("初始化失败", result["detail"])
+        self.assertEqual(result["kind"], "protocol")
+
+    def test_stderr_auth_is_classified(self) -> None:
+        result = handshake.probe(self.profile, "fake", self.spec("stderr-auth"), timeout=5)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["kind"], "auth")
+        self.assertIn("401", result["detail"])
+
     def test_process_tree_is_cleaned_up(self) -> None:
         heartbeat = self.tmp / "heartbeat.txt"
         pid_file = self.tmp / "child.pid"
@@ -139,6 +152,17 @@ class HttpHandshakeTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["stage"], handshake.STAGE_INITIALIZE)
         self.assertIn("鉴权", result["detail"])
+
+    def test_http_403_is_auth_failure(self) -> None:
+        result = self.probe("403")
+        self.assertFalse(result["ok"])
+        self.assertIn("鉴权", result["detail"])
+
+    def test_http_protocol_error(self) -> None:
+        result = self.probe("protocol-error")
+        self.assertFalse(result["ok"])
+        self.assertIn("初始化失败", result["detail"])
+        self.assertEqual(result["kind"], "protocol")
 
     def test_http_no_tools(self) -> None:
         result = self.probe("no-tools")

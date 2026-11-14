@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
-from . import adapters, discovery, doctor, formats, handshake, paths, profiles as profiles_mod, registry, sync, versioning
+from . import (adapters, discovery, doctor, formats, handshake, health, paths,
+               profiles as profiles_mod, registry, sync, versioning)
 
 
 def _profiles():
@@ -33,8 +36,11 @@ def _print_agents() -> None:
         state = "OK" if any(path.exists() for path in profile.paths) else "--"
         print(f"{profile.id:18} {profile.name:20} {state:6} {profile.path}")
         for extra in profile.paths[1:]:
-            mark = "存在" if extra.exists() else "缺失，自动跳过"
-            print(f"{'':18} {'':20} {'附加':6} {extra}（只读，{mark}）")
+            if extra.exists():
+                mark = "只读，存在"
+            else:
+                mark = "只读，可选，未发现" if profile.auxiliary_optional else "只读，必选，缺失"
+            print(f"{'':18} {'':20} {'附加':6} {extra}（{mark}）")
 
 
 def _print_list(agent: str) -> None:
@@ -94,6 +100,21 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 def _cmd_doctor(args: argparse.Namespace) -> int:
     profile = _profile(args.agent)
     rows = doctor.diagnose(profile, network=args.network)
+    environment = doctor.environment_report() if args.env else []
+    if args.json:
+        report = {
+            "agent": profile.id,
+            "name": profile.name,
+            "path": str(profile.path),
+            "generatedAt": dt.datetime.now().isoformat(timespec="seconds"),
+            "servers": rows,
+            "environment": environment,
+        }
+        paths.REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        target = paths.REPORT_DIR / f"doctor-{profile.id}.json"
+        target.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
     print(f"{profile.name}  {profile.path}")
     print(f"{'MCP':24} {'状态':6} {'详情'}")
     for row in rows:
@@ -101,10 +122,10 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         print(f"{row['name']:24} {state:6} {row['detail']}")
         for problem in row["problems"]:
             print(f"{'':24}        ! {problem}")
-    if args.env:
+    if environment:
         print()
         print("本机运行时：")
-        for row in doctor.environment_report():
+        for row in environment:
             print(f"  {row['name']:10} {'OK' if row['available'] else '--':3} {row['path']}")
     return 0
 
@@ -122,15 +143,53 @@ def _cmd_probe(args: argparse.Namespace) -> int:
         print(f"{profile.name} 没有可测试的 MCP。")
         return 0
     failures = 0
+    results: dict[str, dict[str, Any]] = {}
     for name, spec in targets:
         result = handshake.probe(profile, name, spec, timeout=args.timeout)
+        health.record(profile.id, name, result)
+        results[name] = {
+            "ok": bool(result["ok"]),
+            "stage": result["stage"],
+            "detail": result["detail"],
+            "toolCount": len(result["tools"]),
+            "tools": result["tools"],
+            "serverInfo": result.get("serverInfo") or {},
+            "skipped": bool(result.get("skipped")),
+        }
+        if not result["ok"] and not result.get("skipped"):
+            failures += 1
+        if args.json:
+            continue
         state = "OK" if result["ok"] else "FAIL"
         print(f"{name:24} {state:4} {result['stage']:10} {result['detail']}")
         if result["tools"]:
             print(f"{'':24}      工具：{', '.join(result['tools'])}")
-        if not result["ok"] and not result.get("skipped"):
-            failures += 1
+    if args.json:
+        payload = {
+            "agent": profile.id,
+            "generatedAt": dt.datetime.now().isoformat(timespec="seconds"),
+            "servers": results,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 1 if failures else 0
+
+
+def _cmd_health(args: argparse.Namespace) -> int:
+    data = health.load()
+    if args.agent:
+        data = {args.agent: data.get(args.agent, {})}
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+    rows = [(agent, name, value) for agent, servers in data.items() for name, value in servers.items()]
+    if not rows:
+        print("还没有握手缓存。运行 mcpmanager probe --agent <id> 后生成。")
+        return 0
+    print(f"{'AGENT':16} {'MCP':24} {'状态':6} {'工具':4} 检查时间")
+    for agent, name, value in sorted(rows):
+        state = "OK" if value.get("ok") else "FAIL"
+        print(f"{agent:16} {name:24} {state:6} {value.get('toolCount', 0):<4} {value.get('checkedAt', '')}")
+    return 0
 
 
 def _cmd_updates(_args: argparse.Namespace) -> int:
@@ -146,13 +205,12 @@ def _cmd_updates(_args: argparse.Namespace) -> int:
         try:
             latest = versioning.latest_version(spec)
         except Exception as exc:  # noqa: BLE001 - reported inline
-            print(f"{name:24} 查询失败：{exc}")
+            print(f"{name:24} {versioning.STATUS_FAILED:8} {exc}")
             continue
-        if registry.normalize_version(latest) == registry.normalize_version(current):
-            print(f"{name:24} 已是最新 {current}")
-        else:
+        status, _cmp = versioning.compare_versions(current, latest)
+        if status == versioning.STATUS_NEWER:
             updatable.append(name)
-            print(f"{name:24} {current or '未登记'} -> {latest}")
+        print(f"{name:24} {status:8} {current or '未登记'} -> {latest}")
     if updatable:
         print("可更新：" + ", ".join(updatable))
     return 0
@@ -299,6 +357,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(prog="mcpmanager", description="跨 Agent 的 MCP 管理器")
     parser.add_argument("--version", action="version", version=f"mcpmanager {__version__}")
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="只读模式：允许扫描、诊断、握手和报告，禁止写入配置、安装、升级和修改注册表",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("agents", help="列出已支持的 Agent").set_defaults(func=_cmd_agents)
@@ -316,13 +379,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--agent", required=True)
     p.add_argument("--network", action="store_true", help="额外探测远程 URL")
     p.add_argument("--env", action="store_true", help="显示 Node/npm/uvx 等运行时")
+    p.add_argument("--json", action="store_true", help="输出 JSON 并写入 local/reports")
     p.set_defaults(func=_cmd_doctor)
 
     p = sub.add_parser("probe", help="真实 MCP 握手测试（initialize + tools/list）")
     p.add_argument("--agent", required=True)
     p.add_argument("--name", help="只测试指定的 MCP")
     p.add_argument("--timeout", type=float, default=20.0)
+    p.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     p.set_defaults(func=_cmd_probe)
+
+    p = sub.add_parser("health", help="查看上次握手缓存")
+    p.add_argument("--agent")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=_cmd_health)
 
     p = sub.add_parser("updates", help="检查可升级的包")
     p.set_defaults(func=_cmd_updates)
@@ -372,8 +442,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "read_only", False):
+        os.environ["MCP_MANAGER_READ_ONLY"] = "1"
     try:
         return args.func(args)
-    except (KeyError, FileNotFoundError, formats.ConfigError, sync.SecretError, ValueError) as exc:
+    except (KeyError, FileNotFoundError, formats.ConfigError, paths.ReadOnlyError,
+            sync.SecretError, ValueError) as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 2

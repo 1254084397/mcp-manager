@@ -2,6 +2,31 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [1.2.0] - 2026-11-14
+
+### 新增
+
+- **数字版本比较**：`updates` 和 GUI 不再只判断“不相等”，而是按数字逐段比较，识别 `v` 前缀、`rc`/`beta`/`dev` 预发布和 `post` 版本。
+- **版本状态**：已是最新、有新版本、当前版本更高、无法比较、未安装、查询失败；当前版本更高时不会提示升级或降级。
+- **只读模式**：`--read-only` 或 `MCP_MANAGER_READ_ONLY=1` 禁止写入注册表、写入 Agent 配置、安装、升级、应用候选和删除条目，保留扫描、诊断、握手和报告。
+- **Profile schema 校验**：加载时检查必填字段、字段类型、未知字段和未知路径占位符，错误会指出文件名。
+- **可选附加配置**：新增 `auxiliary_optional` 和 `config_priority` 字段；`agents` 和 GUI 会区分“可选未发现”和“必选缺失”。
+- **握手 JSON**：`probe --json` 输出 agent、每个 MCP 的状态、阶段、工具数量和工具列表。
+- **握手缓存**：`probe` 结果写入 `local/health.json`，新增 `health` 命令，GUI 详情显示上次握手状态。
+- **诊断报告导出**：`doctor --json` 输出机器可读报告，并写入 `local/reports/doctor-<agent>.json`。
+- **候选差异**：GUI 候选预览新增“查看差异”，显示当前配置与候选配置的 unified diff。
+- **开源协作文件**：新增 `CONTRIBUTING.md`、`CODE_OF_CONDUCT.md`、Issue 模板和 PR 模板。
+
+### 改进
+
+- `agents` 对附加配置显示“只读，存在 / 可选未发现 / 必选缺失”。
+- README 补充只读模式、版本状态、JSON 输出、握手缓存和候选差异说明。
+- 测试覆盖版本比较、只读模式、profile 校验、候选差异和握手缓存。
+
+### 测试
+
+- 自动测试从 29 项增加到 45 项，全部通过。
+
 ## [1.1.1] - 2026-11-14
 
 ### 安全

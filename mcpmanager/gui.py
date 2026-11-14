@@ -18,7 +18,7 @@ import traceback
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from . import __version__, adapters, discovery, doctor, formats, handshake, paths, profiles, registry, sync, versioning
+from . import __version__, adapters, discovery, doctor, formats, handshake, health, paths, profiles, registry, sync, versioning
 
 FONT = "Microsoft YaHei UI"
 MONO = "Consolas"
@@ -122,7 +122,7 @@ class App:
         self.apply_theme()
         self.refresh_agents()
         self.refresh_servers()
-        self.set_status("就绪")
+        self.set_status("就绪（只读模式）" if paths.read_only() else "就绪")
         self._set_details("在左侧选择 Agent，再选择一条 MCP 查看详情。")
         self.root.after(250, self._init_sash)
         if self.settings.get("log_visible", True) is False:
@@ -690,9 +690,13 @@ class App:
             )
         else:
             extra = [str(path) for path in profile.paths[1:] if path.exists()]
+            missing = [path for path in profile.paths[1:] if not path.exists()]
             text = f"{profile.name}  ·  {profile.path}  ·  已配置 {len(section)} 项"
             if extra:
                 text += "  ·  附加只读：" + "，".join(extra)
+            if missing:
+                text += ("  ·  附加来源未发现（可选）" if profile.auxiliary_optional
+                         else "  ·  附加来源缺失（必选）")
             self.hint.configure(text=text, fg=self.palette()["muted"])
         if ignored and not error:
             self.hint.configure(text=self.hint.cget("text") + f"  ·  已忽略 {ignored} 个非 MCP 条目")
@@ -757,6 +761,12 @@ class App:
             lines.append(f"更新命令    {update_command}")
         source = row.get("source") or str(profile.path)
         lines.append(f"来源文件    {source}" + ("（附加配置·只读）" if row.get("aux") else ""))
+        cached = health.get(profile.id, row["name"])
+        if cached:
+            state = "OK" if cached.get("ok") else "FAIL"
+            lines.append(
+                f"上次握手    {state} · {cached.get('toolCount', 0)} 个工具 · {cached.get('checkedAt', '')}"
+            )
         return "\n".join(lines)
 
     def _set_details(self, text: str) -> None:
@@ -972,6 +982,7 @@ class App:
             return handshake.probe(profile, name, live)
 
         def done(result) -> None:
+            health.record(profile.id, name, result)
             if result["ok"]:
                 state = "成功"
             elif result.get("skipped"):
@@ -1068,10 +1079,39 @@ class App:
         actions.pack(fill="x", padx=16, pady=(0, 14))
         tk.Button(actions, text="关闭", command=window.destroy, relief="flat", bd=0, padx=14, pady=7,
                   bg=colors["surface"], fg=colors["text"], font=(FONT, 9), cursor="hand2").pack(side="right")
+        tk.Button(actions, text="查看差异", command=lambda: self.show_diff(path), relief="flat", bd=0,
+                  padx=14, pady=7, bg=colors["surface"], fg=colors["text"], font=(FONT, 9),
+                  cursor="hand2").pack(side="right", padx=8)
         tk.Button(actions, text="应用到 Agent", relief="flat", bd=0, padx=14, pady=7,
                   bg=colors["accent"], fg="#ffffff", activebackground=colors["accent_hover"],
                   activeforeground="#ffffff", font=(FONT, 9), cursor="hand2",
                   command=lambda: self.apply_candidate(path, window)).pack(side="right", padx=8)
+
+    def show_diff(self, path: Path) -> None:
+        try:
+            text = sync.candidate_diff(path)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the user
+            messagebox.showerror("无法生成差异", str(exc), parent=self.root)
+            return
+        colors = self.palette()
+        window = tk.Toplevel(self.root)
+        window.title("候选差异")
+        window.geometry("960x640")
+        window.configure(bg=colors["bg"])
+        tk.Label(window, text="当前配置 → 候选配置（unified diff）", bg=colors["bg"],
+                 fg=colors["text"], font=(FONT, 11, "bold")).pack(anchor="w", padx=16, pady=(12, 6))
+        box = tk.Text(window, wrap="none", relief="flat", bd=0, padx=12, pady=10,
+                      font=(MONO, 9), bg=colors["surface"], fg=colors["text"], highlightthickness=0)
+        box.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+        box.insert("end", text or "没有差异。")
+        box.tag_configure("add", foreground=colors["ok"])
+        box.tag_configure("remove", foreground=colors["danger"])
+        for index, line in enumerate(text.splitlines(), start=1):
+            if line.startswith("+") and not line.startswith("+++"):
+                box.tag_add("add", f"{index}.0", f"{index}.end")
+            elif line.startswith("-") and not line.startswith("---"):
+                box.tag_add("remove", f"{index}.0", f"{index}.end")
+        box.configure(state="disabled")
 
     def apply_candidate(self, path: Path, window: tk.Toplevel | None = None) -> None:
         parent = window or self.root
@@ -1274,9 +1314,12 @@ class App:
                 current = str(spec.get(field, "")) if field else ""
                 try:
                     latest = versioning.latest_version(spec)
-                    results.append((name, str(spec.get("package")), current, latest, latest != current))
+                    status, _cmp = versioning.compare_versions(current, latest)
+                    results.append((name, str(spec.get("package")), current, latest, status,
+                                    status == versioning.STATUS_NEWER))
                 except Exception as exc:  # noqa: BLE001 - shown in the table
-                    results.append((name, str(spec.get("package")), current, f"查询失败：{exc}", False))
+                    results.append((name, str(spec.get("package")), current,
+                                    f"查询失败：{exc}", versioning.STATUS_FAILED, False))
             return results
 
         self.run_task("正在查询 npm / PyPI 版本…", work, self._show_updates)
@@ -1289,23 +1332,23 @@ class App:
         window.configure(bg=colors["bg"])
         tk.Label(window, text="版本检查结果", bg=colors["bg"], fg=colors["text"],
                  font=(FONT, 12, "bold")).pack(anchor="w", padx=16, pady=(14, 2))
-        updatable = [item for item in results if item[4]]
+        updatable = [item for item in results if item[5]]
         tk.Label(window, text=f"发现 {len(updatable)} 个可更新项，共检查 {len(results)} 个包。",
                  bg=colors["bg"], fg=colors["muted"], font=(FONT, 9)).pack(anchor="w", padx=16, pady=(0, 8))
 
         frame = tk.Frame(window, bg=colors["bg"])
         frame.pack(fill="both", expand=True, padx=16)
-        columns = ("MCP", "包", "当前", "最新")
+        columns = ("MCP", "包", "当前", "最新", "状态")
         table = ttk.Treeview(frame, columns=columns, show="headings", style="App.Treeview")
-        for column, width in zip(columns, (160, 240, 130, 180)):
+        for column, width in zip(columns, (150, 220, 110, 150, 120)):
             table.heading(column, text=column)
             table.column(column, width=width, anchor="w")
         scroll = ttk.Scrollbar(frame, orient="vertical", command=table.yview, style="App.Vertical.TScrollbar")
         table.configure(yscrollcommand=scroll.set)
         table.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
-        for name, package, current, latest, is_new in results:
-            table.insert("", "end", values=(name, package, current or "-", latest),
+        for name, package, current, latest, status, is_new in results:
+            table.insert("", "end", values=(name, package, current or "-", latest, status),
                          tags=("warn",) if is_new else ("missing",))
         self._style_table(table)
 
@@ -1367,10 +1410,26 @@ class App:
             messagebox.showerror("未登记", f"{name} 已不在主注册表中。", parent=self.root)
             return
         package = spec.get("package")
-        current = spec.get(field, "")
-        if registry.normalize_version(latest) == registry.normalize_version(current):
+        current = str(spec.get(field, ""))
+        status, _cmp = versioning.compare_versions(current, latest)
+        if status == versioning.STATUS_LATEST:
             messagebox.showinfo("已是最新", f"{name} 当前版本 {current} 已是官方最新版本。", parent=self.root)
             return
+        if status == versioning.STATUS_CURRENT_HIGHER:
+            messagebox.showinfo(
+                "无需升级",
+                f"{name} 当前登记版本 {current} 高于查询到的最新版本 {latest}，不会降级。",
+                parent=self.root,
+            )
+            return
+        if status == versioning.STATUS_UNCOMPARABLE:
+            if not messagebox.askyesno(
+                "版本无法比较",
+                f"{name} 的版本 {current or '未登记'} 与 {latest} 无法按数字规则比较。\n"
+                f"是否仍将注册表版本写为 {latest}？",
+                parent=self.root,
+            ):
+                return
         if spec.get("kind") == "npm-global":
             if not messagebox.askyesno(
                 "全局安装", f"将执行：\n\nnpm install -g {package}@{latest}\n\n继续吗？", parent=self.root

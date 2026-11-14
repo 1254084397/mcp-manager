@@ -53,6 +53,9 @@ def main() -> int:
     mode = os.environ.get("FAKE_MODE", "ok")
     if mode == "exit-early":
         return 1
+    if mode == "stderr-auth":
+        print("401 Unauthorized: missing token", file=sys.stderr, flush=True)
+        return 1
     if mode == "spawn-child":
         spawn_child()
     for line in sys.stdin:
@@ -66,6 +69,13 @@ def main() -> int:
         if mode == "timeout":
             continue
         if method == "initialize":
+            if mode == "protocol-error":
+                send({
+                    "jsonrpc": "2.0",
+                    "id": message["id"],
+                    "error": {"code": -32600, "message": "invalid request"},
+                })
+                continue
             send({"jsonrpc": "2.0", "id": message["id"], "result": initialize_result()})
         elif method == "tools/list":
             tools = [] if mode == "no-tools" else [{"name": "ping"}, {"name": "echo"}]

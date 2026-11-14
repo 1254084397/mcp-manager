@@ -28,6 +28,8 @@ class Profile:
     enabled: bool = False
     tools: bool = False
     readonly: bool = False
+    auxiliary_optional: bool = True
+    config_priority: str = "primary-first"
     aliases: list[str] = field(default_factory=list)
     notes: str = ""
     source: str = ""
@@ -57,6 +59,16 @@ class Profile:
     def __post_init__(self) -> None:
         if isinstance(self.configs, str):
             self.configs = [self.configs]
+        if isinstance(self.aliases, str):
+            self.aliases = [self.aliases]
+        if not isinstance(self.configs, list) or not all(isinstance(item, str) for item in self.configs):
+            raise ValueError(f"{self.id}: configs 必须是字符串数组")
+        if not isinstance(self.aliases, list) or not all(isinstance(item, str) for item in self.aliases):
+            raise ValueError(f"{self.id}: aliases 必须是字符串数组")
+        if not isinstance(self.auxiliary_optional, bool):
+            raise ValueError(f"{self.id}: auxiliary_optional 必须是 true/false")
+        if self.config_priority != "primary-first":
+            raise ValueError(f"{self.id}: config_priority 目前只支持 'primary-first'")
         if self.format not in {"json", "jsonc", "toml"}:
             raise ValueError(f"{self.id}: unsupported format {self.format!r}")
         if self.command not in {"string", "array"}:

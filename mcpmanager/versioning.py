@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -11,8 +12,6 @@ import time
 import urllib.request
 from pathlib import Path
 from typing import Any
-
-from .registry import normalize_version
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if os.name == "nt" else 0
 
@@ -98,11 +97,81 @@ def latest_version(spec: dict[str, Any]) -> str:
     return npm_latest(package)
 
 
+STATUS_LATEST = "已是最新"
+STATUS_NEWER = "有新版本"
+STATUS_CURRENT_HIGHER = "当前版本更高"
+STATUS_UNCOMPARABLE = "无法比较"
+STATUS_MISSING = "未安装"
+STATUS_FAILED = "查询失败"
+
+_PRE_RANK = {
+    "dev": 0,
+    "a": 1,
+    "alpha": 1,
+    "b": 2,
+    "beta": 2,
+    "rc": 3,
+    "c": 3,
+    "pre": 3,
+    "preview": 3,
+    "post": 4,
+}
+
+
+def parse_version(value: str) -> tuple[tuple[int, ...], int, int, int] | None:
+    """Parse numeric versions with optional prerelease/post suffixes.
+
+    Returns ``(numeric_parts, stage, prerelease_rank, prerelease_number)`` where
+    stage is 0 for prerelease, 1 for final, 2 for post release. ``None`` means
+    the string is not a comparable version (``latest``, ``next``, a commit SHA).
+    """
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    if text.startswith("v"):
+        text = text[1:]
+    text = text.split("+", 1)[0]
+    match = re.match(
+        r"^(\d+(?:\.\d+)*)(?:[-._]?(dev|a|alpha|b|beta|rc|c|pre|preview|post))?(\d*)$",
+        text,
+    )
+    if not match:
+        return None
+    numbers = [int(part) for part in match.group(1).split(".")]
+    while len(numbers) > 1 and numbers[-1] == 0:
+        numbers.pop()
+    label = match.group(2) or ""
+    number = int(match.group(3) or 0)
+    if not label:
+        return tuple(numbers), 1, 0, 0
+    rank = _PRE_RANK.get(label, 0)
+    return tuple(numbers), 2 if label == "post" else 0, rank, number
+
+
+def compare_versions(current: str, latest: str) -> tuple[str, int | None]:
+    """Compare a registered version with a queried latest version."""
+    if not str(current or "").strip():
+        return STATUS_MISSING, None
+    left = parse_version(current)
+    right = parse_version(latest)
+    if left is None or right is None:
+        return STATUS_UNCOMPARABLE, None
+    if left < right:
+        return STATUS_NEWER, -1
+    if left > right:
+        return STATUS_CURRENT_HIGHER, 1
+    return STATUS_LATEST, 0
+
+
 def is_newer(latest: str, current: str) -> bool:
-    return normalize_version(latest) != normalize_version(current)
+    return compare_versions(current, latest)[0] == STATUS_NEWER
+
 
 
 def npm_install_global(package: str, version: str) -> tuple[bool, str]:
+    from . import paths
+
+    paths.require_writable("安装 npm 包")
     npm = find_tool("npm.cmd", "npm")
     if not npm:
         return False, "未找到 npm，请确认 Node.js 已安装并加入 PATH"
@@ -162,6 +231,10 @@ def run_custom_update(
     command: str | list[str] | tuple[str, ...], cwd: str | Path | None = None
 ) -> tuple[bool, str]:
     """Run a stored upgrade command as argv, never through a shell."""
+    from . import paths
+
+    if paths.read_only():
+        return False, "只读模式：禁止执行更新命令"
     parts = split_command(command)
     if not parts:
         return False, "更新命令为空"

@@ -20,6 +20,8 @@ def canonical(name: str) -> str:
 def load(path: Path | None = None) -> dict[str, Any]:
     target = path or paths.REGISTRY_PATH
     paths.ensure_layout()
+    if not target.exists() and paths.read_only():
+        return copy.deepcopy(paths.EMPTY_REGISTRY)
     try:
         data = json.loads(target.read_text(encoding="utf-8-sig"))
     except FileNotFoundError as exc:
@@ -33,6 +35,7 @@ def load(path: Path | None = None) -> dict[str, Any]:
 
 
 def save(data: dict[str, Any], path: Path | None = None) -> None:
+    paths.require_writable("写入注册表")
     target = path or paths.REGISTRY_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

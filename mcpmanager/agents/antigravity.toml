@@ -3,6 +3,8 @@ name = "Antigravity"
 config = "{home}/.gemini/config/mcp_config.json"
 # 附加配置只读合并：存在时一起显示，缺失时自动跳过；写入只针对上面的主配置。
 configs = ["{home}/.gemini/antigravity/mcp_config.json"]
+auxiliary_optional = true
+config_priority = "primary-first"
 format = "json"
 schema = "mcpServers"
 notes = "Antigravity 主配置在 Gemini 配置目录；antigravity 子目录中的配置若存在则作为只读附加来源合并。"

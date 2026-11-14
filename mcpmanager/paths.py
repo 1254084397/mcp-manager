@@ -64,6 +64,20 @@ PLACEHOLDERS = {
 }
 
 
+class ReadOnlyError(Exception):
+    """A mutation was attempted while ``MCP_MANAGER_READ_ONLY`` is active."""
+
+
+def read_only() -> bool:
+    value = os.environ.get("MCP_MANAGER_READ_ONLY", "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def require_writable(action: str) -> None:
+    if read_only():
+        raise ReadOnlyError(f"只读模式：禁止{action}")
+
+
 def expand_path(template: str) -> Path:
     """Resolve ``{home}``/``{appdata}`` placeholders in a profile path."""
 
@@ -86,7 +100,7 @@ EMPTY_REGISTRY = {"schemaVersion": 1, "servers": {}}
 def ensure_layout() -> None:
     """Create writable folders and seed a registry on first run."""
     ensure_dirs()
-    if REGISTRY_PATH.exists():
+    if read_only() or REGISTRY_PATH.exists():
         return
     legacy = PROJECT_ROOT / "registry" / "mcp-registry.json"
     if legacy.exists():

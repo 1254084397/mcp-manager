@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import difflib
 import hashlib
 import json
 import shutil
@@ -80,6 +81,25 @@ def is_fresh(candidate: dict[str, Any]) -> bool:
     return hashlib.sha256(target.read_bytes()).hexdigest() == candidate["sourceSha256"]
 
 
+def candidate_diff(path: Path) -> str:
+    """Unified diff between the live MCP section and a candidate."""
+    candidate = load_candidate(path)
+    target = Path(candidate["targetPath"])
+    before: dict[str, Any] = {}
+    if target.exists():
+        before = formats.read_section(target, candidate["format"], candidate["schema"])
+    after = candidate.get("servers") if isinstance(candidate.get("servers"), dict) else {}
+    before_lines = json.dumps(before, ensure_ascii=False, indent=2, sort_keys=True).splitlines()
+    after_lines = json.dumps(after, ensure_ascii=False, indent=2, sort_keys=True).splitlines()
+    return "\n".join(difflib.unified_diff(
+        before_lines,
+        after_lines,
+        fromfile=f"当前 {target}",
+        tofile=f"候选 {path.name}",
+        lineterm="",
+    ))
+
+
 def _backup(target: Path, label: str) -> Path:
     paths.BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -89,6 +109,7 @@ def _backup(target: Path, label: str) -> Path:
 
 
 def apply_candidate(path: Path) -> tuple[Path | None, str]:
+    paths.require_writable("应用候选配置")
     candidate = load_candidate(path)
     if not is_fresh(candidate):
         raise formats.ConfigError("目标配置在生成候选后已变化，请重新生成候选并检查差异。")
@@ -104,6 +125,7 @@ def apply_candidate(path: Path) -> tuple[Path | None, str]:
 
 
 def apply_section(profile: Profile, servers: dict[str, Any]) -> tuple[Path | None, str]:
+    paths.require_writable("写入 Agent 配置")
     if profile.readonly:
         raise formats.ConfigError(f"{profile.name} 被标记为只读，不写入。")
     target = profile.path
@@ -114,6 +136,7 @@ def apply_section(profile: Profile, servers: dict[str, Any]) -> tuple[Path | Non
 
 def install_candidate(profile: Profile, registry_data: dict[str, Any], name: str) -> Path:
     """Build a one-server candidate without touching the live config."""
+    paths.require_writable("生成安装候选")
     definition = registry.entry(registry_data, name)
     if definition is None:
         raise KeyError(f"{name} 不在主注册表中")
