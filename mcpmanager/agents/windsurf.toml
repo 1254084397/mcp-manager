@@ -1,0 +1,6 @@
+id = "windsurf"
+name = "Windsurf"
+config = "{home}/.codeium/windsurf/mcp_config.json"
+format = "json"
+schema = "mcpServers"
+notes = "Windsurf 用户级 MCP 配置。"

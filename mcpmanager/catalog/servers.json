@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "servers": {
+    "context7": {
+      "description": "Upstash Context7 文档检索（远程/本地包均可）",
+      "kind": "npm-on-demand",
+      "package": "@upstash/context7-mcp",
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"],
+      "agents": ["*"]
+    },
+    "playwright": {
+      "description": "Playwright 浏览器自动化",
+      "kind": "npm-on-demand",
+      "package": "@playwright/mcp",
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp"],
+      "versionPolicy": "pin-before-sync",
+      "version": "0.0.85",
+      "agents": ["*"]
+    },
+    "memory": {
+      "description": "官方知识图谱记忆服务",
+      "kind": "npm-on-demand",
+      "package": "@modelcontextprotocol/server-memory",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "agents": ["*"]
+    },
+    "sequential-thinking": {
+      "description": "官方分步推理服务",
+      "kind": "npm-on-demand",
+      "package": "@modelcontextprotocol/server-sequential-thinking",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+      "agents": ["*"]
+    },
+    "markitdown": {
+      "description": "MarkItDown 文档转 Markdown",
+      "kind": "uv-on-demand",
+      "package": "markitdown-mcp",
+      "command": "uvx",
+      "args": ["markitdown-mcp"],
+      "versionPolicy": "pin-before-sync",
+      "version": "0.0.1a8",
+      "agents": ["*"]
+    }
+  }
+}

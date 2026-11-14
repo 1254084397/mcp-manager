@@ -1,0 +1,10 @@
+id = "vscode"
+name = "VS Code"
+config = "{appdata}/Code/User/mcp.json"
+format = "json"
+schema = "servers"
+aliases = ["vs-code", "code"]
+transport = "type"
+stdio_type = "stdio"
+http_type = "http"
+notes = "VS Code 1.102+ 使用 servers 字段和 type=stdio/http。"

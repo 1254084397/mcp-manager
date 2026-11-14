@@ -1,0 +1,11 @@
+id = "copilot-cli"
+name = "GitHub Copilot CLI"
+config = "{home}/.copilot/mcp-config.json"
+format = "json"
+schema = "mcpServers"
+aliases = ["copilot", "github-copilot"]
+transport = "type"
+stdio_type = "local"
+http_type = "http"
+tools = true
+notes = "Copilot CLI 用 type=local/http；宿主/插件级 MCP 不在本文件中。"

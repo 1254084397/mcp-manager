@@ -1,0 +1,7 @@
+id = "trae-solo"
+name = "Trae SOLO CN"
+config = "{appdata}/TRAE SOLO CN/User/mcp.json"
+format = "json"
+schema = "mcpServers"
+aliases = ["trae-solo-cn"]
+notes = "Trae SOLO 用户级 mcp.json。"

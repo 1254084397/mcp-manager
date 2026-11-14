@@ -1,0 +1,6 @@
+id = "cline"
+name = "Cline"
+config = "{appdata}/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json"
+format = "json"
+schema = "mcpServers"
+notes = "Cline VS Code 扩展的全局 MCP 设置。"

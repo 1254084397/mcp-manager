@@ -1,0 +1,14 @@
+id = "opencode"
+name = "OpenCode"
+config = "{home}/.config/opencode/opencode.json"
+format = "jsonc"
+schema = "mcp"
+aliases = ["open-code"]
+command = "array"
+env = "environment"
+transport = "type"
+stdio_type = "local"
+http_type = "remote"
+enabled = true
+url_key = "url"
+notes = "OpenCode 用 mcp 字段，stdio 写成 command 数组，环境变量键名为 environment。"

@@ -1,0 +1,7 @@
+id = "codex"
+name = "Codex CLI"
+config = "{home}/.codex/config.toml"
+format = "toml"
+schema = "mcp_servers"
+aliases = ["codex-cli"]
+notes = "Codex 使用 TOML 的 mcp_servers 表；同步只替换该表，其余配置原样保留。"

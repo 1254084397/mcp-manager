@@ -1,0 +1,6 @@
+id = "antigravity"
+name = "Antigravity"
+config = "{home}/.gemini/config/mcp_config.json"
+format = "json"
+schema = "mcpServers"
+notes = "Antigravity 使用 Gemini 配置目录下的 mcp_config.json。"

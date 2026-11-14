@@ -1,0 +1,6 @@
+id = "cursor"
+name = "Cursor"
+config = "{home}/.cursor/mcp.json"
+format = "json"
+schema = "mcpServers"
+notes = "Cursor 全局 MCP 配置；项目级 .cursor/mcp.json 可用扫描目录纳入。"
