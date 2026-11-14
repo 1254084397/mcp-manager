@@ -6,6 +6,7 @@ this module only renders whatever the core reports.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import datetime as dt
 import json
@@ -18,7 +19,7 @@ import traceback
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from . import __version__, adapters, discovery, doctor, formats, handshake, health, paths, profiles, registry, sync, versioning
+from . import __version__, adapters, creation, discovery, doctor, formats, handshake, health, paths, profiles, registry, sync, versioning
 
 FONT = "Microsoft YaHei UI"
 MONO = "Consolas"
@@ -255,6 +256,7 @@ class App:
         action_menu.add_command(label="备份管理…", command=self.open_backup_manager)
         action_menu.add_separator()
         action_menu.add_command(label="初始化当前 Agent 配置", command=self.init_config)
+        action_menu.add_command(label="添加 MCP…", command=self.add_mcp)
         action_menu.add_command(label="修改当前 Agent 配置位置…", command=self.edit_profile_path)
         action_menu.add_command(label="生成候选配置", command=self.generate_candidate)
         action_menu.add_command(label="应用候选…", command=self.show_candidate_preview)
@@ -351,6 +353,7 @@ class App:
         for text, command, kind in (
             ("恢复备份", self.open_backup_manager, "ghost"),
             ("备份全部", self.backup_all, "ghost"),
+            ("添加 MCP", self.add_mcp, "ghost"),
             ("应用候选…", self.show_candidate_preview, "ghost"),
             ("生成候选", self.generate_candidate, "accent"),
             ("配置位置", self.edit_profile_path, "ghost"),
@@ -1153,6 +1156,265 @@ class App:
         self.log(f"已创建 {profile.name} 配置：{profile.path}")
         self.refresh_all()
         self._open(profile.path)
+
+    def add_mcp(self) -> None:
+        """Register a new MCP and prepare an install candidate for this Agent."""
+        if paths.read_only():
+            messagebox.showwarning("只读模式", "当前处于只读模式，不能添加 MCP。", parent=self.root)
+            return
+        profile = self.current()
+        if profile.readonly:
+            messagebox.showwarning("Agent 只读", f"{profile.name} 的 profile 被标记为只读，不能添加 MCP。", parent=self.root)
+            return
+        colors = self.palette()
+        window = tk.Toplevel(self.root)
+        window.title(f"添加 MCP 到 {profile.name}")
+        window.geometry("760x700")
+        window.configure(bg=colors["bg"])
+        window.transient(self.root)
+        window.grab_set()
+
+        tk.Label(
+            window,
+            text=f"添加 MCP · 目标 Agent：{profile.name}",
+            bg=colors["bg"], fg=colors["text"], font=(FONT, 13, "bold"),
+        ).pack(anchor="w", padx=20, pady=(16, 4))
+        tk.Label(
+            window,
+            text="填写 command 或 URL。保存后只登记到本地注册表，并生成候选配置；确认差异后才会写入 Agent。",
+            bg=colors["bg"], fg=colors["muted"], font=(FONT, 9), justify="left",
+        ).pack(anchor="w", padx=20, pady=(0, 10))
+
+        form = tk.Frame(window, bg=colors["bg"])
+        form.pack(fill="both", expand=True, padx=20)
+        fields: dict[str, tk.Entry] = {}
+
+        def add_field(key: str, label: str, value: str = "") -> tk.Entry:
+            tk.Label(form, text=label, bg=colors["bg"], fg=colors["text"],
+                     font=(FONT, 9), anchor="w").pack(fill="x", pady=(6, 2))
+            entry = tk.Entry(
+                form, relief="flat", font=(MONO, 9), bg=colors["surface"], fg=colors["text"],
+                insertbackground=colors["text"], highlightthickness=1,
+            )
+            entry.insert(0, value)
+            entry.pack(fill="x", ipady=5)
+            self._themed.append(
+                lambda e=entry: e.configure(
+                    bg=self.palette()["surface"], fg=self.palette()["text"],
+                    insertbackground=self.palette()["text"],
+                    highlightbackground=self.palette()["border"],
+                    highlightcolor=self.palette()["accent"],
+                )
+            )
+            fields[key] = entry
+            return entry
+
+        add_field("name", "MCP 名称（必填）")
+        add_field("command", "启动命令（stdio，与 URL 二选一）")
+        add_field("args", "参数（可选，使用空格和引号分隔，例如：-y @playwright/mcp@0.0.85）")
+        add_field("url", "远程 URL（http MCP，与启动命令二选一）")
+
+        tk.Label(form, text="环境变量（可选，逐项填写，值可含分号和等号）", bg=colors["bg"],
+                 fg=colors["text"], font=(FONT, 9), anchor="w").pack(fill="x", pady=(6, 2))
+        env_container = tk.Frame(form, bg=colors["bg"])
+        env_container.pack(fill="x")
+        env_rows: list[tuple[tk.Frame, tk.Entry, tk.Entry]] = []
+
+        def themed_entry(parent: tk.Misc) -> tk.Entry:
+            entry = tk.Entry(
+                parent, relief="flat", font=(MONO, 9), bg=colors["surface"], fg=colors["text"],
+                insertbackground=colors["text"], highlightthickness=1,
+            )
+            self._themed.append(
+                lambda e=entry: e.configure(
+                    bg=self.palette()["surface"], fg=self.palette()["text"],
+                    insertbackground=self.palette()["text"],
+                    highlightbackground=self.palette()["border"],
+                    highlightcolor=self.palette()["accent"],
+                )
+            )
+            return entry
+
+        def add_env_row() -> None:
+            row = tk.Frame(env_container, bg=colors["bg"])
+            row.pack(fill="x", pady=1)
+            key_entry = themed_entry(row)
+            key_entry.pack(side="left", fill="x", expand=True, ipady=3)
+            value_entry = themed_entry(row)
+            value_entry.pack(side="left", fill="x", expand=True, ipady=3, padx=(4, 4))
+            remove_btn = tk.Button(
+                row, text="×", relief="flat", bd=0, padx=6, pady=0,
+                bg=colors["surface"], fg=colors["muted"], activebackground=colors["border"],
+                activeforeground=colors["text"], font=(FONT, 10), cursor="hand2",
+                command=lambda: remove_env_row(row),
+            )
+            remove_btn.pack(side="left")
+            env_rows.append((row, key_entry, value_entry))
+            key_entry.focus_set()
+
+        def remove_env_row(row: tk.Frame) -> None:
+            for i, (r, _k, _v) in enumerate(env_rows):
+                if r is row:
+                    env_rows.pop(i)
+                    break
+            row.destroy()
+
+        add_env_row()
+        tk.Button(
+            form, text="+ 添加环境变量", relief="flat", bd=0, padx=8, pady=3,
+            bg=colors["surface"], fg=colors["text"], activebackground=colors["border"],
+            activeforeground=colors["text"], font=(FONT, 8), cursor="hand2",
+            command=add_env_row,
+        ).pack(anchor="w", pady=(2, 0))
+
+        add_field("kind", "类型（可选，例如：npm-on-demand、uv-on-demand、remote-http、local-binary）")
+        add_field("package", "包名（可选，例如：@playwright/mcp）")
+        add_field("version", "版本（可选；填写后同步时可固定版本）")
+
+        actions = tk.Frame(window, bg=colors["bg"])
+        actions.pack(fill="x", padx=20, pady=16)
+
+        def save() -> None:
+            env: dict[str, str] = {}
+            for _row, key_entry, value_entry in env_rows:
+                key = key_entry.get().strip()
+                value = value_entry.get()
+                if not key and not value:
+                    continue
+                env[key] = value
+            try:
+                name, spec, secret_keys = creation.build_server_spec(
+                    name=fields["name"].get(),
+                    command=fields["command"].get(),
+                    args_text=fields["args"].get(),
+                    url=fields["url"].get(),
+                    env=env,
+                    kind=fields["kind"].get(),
+                    package=fields["package"].get(),
+                    version=fields["version"].get(),
+                    agent_id=profile.id,
+                )
+            except ValueError as exc:
+                messagebox.showerror("输入无效", str(exc), parent=window)
+                return
+            command = str(spec.get("command", ""))
+            url = str(spec.get("url", ""))
+            args = spec.get("args", [])
+            env = spec.get("env", {})
+            data = registry.load()
+            try:
+                existing_section, _sources = formats.read_merged_section(
+                    profile.paths, profile.format, profile.schema
+                )
+            except Exception as exc:
+                messagebox.showerror("配置读取失败", str(exc), parent=window)
+                return
+            if any(registry.canonical(existing) == registry.canonical(name)
+                   for existing in existing_section):
+                messagebox.showerror(
+                    "MCP 已配置",
+                    f"{name} 已存在于 {profile.name} 的主配置或附加配置中，不能重复添加。",
+                    parent=window,
+                )
+                return
+            existing = registry.entry(data, name)
+            if existing is not None:
+                candidate_data = copy.deepcopy(data)
+                existing = registry.entry(candidate_data, name)
+                existing_command = str(existing.get("command", ""))
+                existing_url = str(existing.get("url", ""))
+                existing_args = existing.get("args", []) or []
+                existing_env = existing.get("env", {}) or {}
+                version_policy = existing.get("versionPolicy")
+                secret_keys = [k for k, v in existing_env.items() if adapters.has_inline_secret(v, k)]
+                preview = [
+                    f"名称：{name}",
+                    f"来源：本地注册表（不修改已有定义）",
+                    f"目标 Agent：{profile.name}",
+                    f"类型：{existing.get('kind', 'manual')}",
+                ]
+                if existing_command:
+                    preview.append(f"实际命令：{existing_command}")
+                if existing_url:
+                    preview.append(f"远程地址：{existing_url}")
+                preview.append(f"实际参数：{' '.join(existing_args) if existing_args else '-'}")
+                preview.append(f"环境变量：{len(existing_env)} 项")
+                if version_policy:
+                    preview.append(f"版本策略：{version_policy}")
+                if existing.get("package"):
+                    preview.append(f"包名：{existing.get('package')}"
+                                   + (f"@{existing.get('version')}" if existing.get("version") else ""))
+                preview += [
+                    "",
+                    f"将为 {profile.name} 生成候选配置。",
+                ]
+                if secret_keys:
+                    preview += [
+                        "",
+                        "警告：以下环境变量看起来包含凭据：" + ", ".join(secret_keys),
+                        "它们会随候选进入目标 Agent 配置。更安全的做法是让 Agent 从系统环境变量或密钥文件读取。",
+                    ]
+                if not messagebox.askyesno("确认生成候选", "\n".join(preview), parent=window):
+                    return
+                try:
+                    candidate, agent_added = sync.attach_agent_and_install(profile, candidate_data, name)
+                    if agent_added:
+                        registry.save(candidate_data)
+                except Exception as exc:
+                    messagebox.showerror("生成候选失败", str(exc), parent=window)
+                    return
+                window.destroy()
+                self.refresh_servers()
+                self.log(f"已为 {profile.name} 生成 {name} 的候选配置：{candidate}")
+                messagebox.showinfo(
+                    "候选已生成",
+                    f"{name} 已在注册表中，已为 {profile.name} 生成候选配置。\n\n候选配置：\n{candidate}\n\n请在候选预览中确认差异后应用。",
+                    parent=self.root,
+                )
+                self.show_preview(candidate)
+                return
+            preview = [
+                f"名称：{name}",
+                f"Agent：{profile.name}",
+                f"类型：{spec['kind']}",
+                f"命令：{command or url}",
+                f"参数：{' '.join(args) if args else '-'}",
+                f"环境变量：{len(env)} 项",
+                "",
+                "将写入本地注册表并生成候选配置；不会直接覆盖 Agent 配置。",
+            ]
+            if secret_keys:
+                preview += [
+                    "",
+                    "警告：以下环境变量看起来包含凭据：" + ", ".join(secret_keys),
+                    "它们会写入本地注册表。更安全的做法是让 Agent 从系统环境变量或密钥文件读取。",
+                ]
+            if not messagebox.askyesno("确认添加 MCP", "\n".join(preview), parent=window):
+                return
+            try:
+                candidate_data = copy.deepcopy(data)
+                registry.add_server(candidate_data, name, spec)
+                candidate = sync.install_candidate(profile, candidate_data, name)
+                registry.save(candidate_data)
+            except Exception as exc:
+                messagebox.showerror("添加失败", str(exc), parent=window)
+                return
+            window.destroy()
+            self.refresh_servers()
+            self.log(f"已登记 {name}，候选配置：{candidate}")
+            messagebox.showinfo("候选已生成", f"{name} 已登记。\n\n候选配置：\n{candidate}\n\n请在候选预览中确认差异后应用。", parent=self.root)
+            self.show_preview(candidate)
+
+        tk.Button(
+            actions, text="取消", command=window.destroy, relief="flat", bd=0, padx=14, pady=7,
+            bg=colors["surface"], fg=colors["text"], font=(FONT, 9), cursor="hand2",
+        ).pack(side="right")
+        tk.Button(
+            actions, text="登记并生成候选", command=save, relief="flat", bd=0, padx=16, pady=7,
+            bg=colors["accent"], fg="#ffffff", activebackground=colors["accent_hover"],
+            activeforeground="#ffffff", font=(FONT, 9), cursor="hand2",
+        ).pack(side="right", padx=8)
+        fields["name"].focus_set()
 
     def edit_profile_path(self) -> None:
         profile = self.current()

@@ -9,6 +9,7 @@ import json
 import shutil
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from . import adapters, formats, paths, profiles as profiles_mod, registry
 from .model import Candidate, Profile
@@ -157,6 +158,31 @@ def install_candidate(profile: Profile, registry_data: dict[str, Any], name: str
         "servers": section,
     }
     paths.GENERATED_DIR.mkdir(parents=True, exist_ok=True)
-    path = paths.GENERATED_DIR / f"{profile.id}-install-{name}.json"
+    safe_name = quote(name, safe="-._")
+    path = paths.GENERATED_DIR / f"{profile.id}-install-{safe_name}.json"
     path.write_text(json.dumps(candidate, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return path
+
+
+def attach_agent_and_install(
+    profile: Profile, registry_data: dict[str, Any], name: str
+) -> tuple[Path, bool]:
+    """Attach the agent to an existing registry MCP's agents list and generate a candidate.
+
+    The registry entry must already exist. The agent id is appended to its
+    ``agents`` list only when absent. Returns ``(candidate_path, registry_modified)``
+    so the caller can persist the registry exactly once after the candidate is
+    successfully generated.
+    """
+    entry = registry.entry(registry_data, name)
+    if entry is None:
+        raise KeyError(f"{name} 不在注册表中")
+    agents = entry.get("agents")
+    if not isinstance(agents, list):
+        agents = []
+    agent_added = profile.id not in agents
+    if agent_added:
+        agents.append(profile.id)
+        entry["agents"] = agents
+    candidate = install_candidate(profile, registry_data, name)
+    return candidate, agent_added

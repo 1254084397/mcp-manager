@@ -214,6 +214,41 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(mode, "created")
         self.assertEqual(json.loads(missing.read_text(encoding="utf-8"))["mcpServers"]["memory"]["command"], "npx")
 
+    def test_attach_agent_and_install_appends_agent_and_generates_candidate(self):
+        data = {
+            "servers": {
+                "memory": {
+                    "command": "npx",
+                    "args": ["-y", "memory-server"],
+                    "agents": ["other"],
+                }
+            }
+        }
+        candidate, modified = sync.attach_agent_and_install(self.profile, data, "memory")
+        self.assertTrue(modified)
+        self.assertIn("fake", data["servers"]["memory"]["agents"])
+        self.assertIn("other", data["servers"]["memory"]["agents"])
+        self.assertTrue(candidate.exists())
+
+    def test_attach_agent_and_install_skips_when_agent_already_listed(self):
+        data = {
+            "servers": {
+                "memory": {
+                    "command": "npx",
+                    "args": ["-y", "memory-server"],
+                    "agents": ["fake"],
+                }
+            }
+        }
+        candidate, modified = sync.attach_agent_and_install(self.profile, data, "memory")
+        self.assertFalse(modified)
+        self.assertEqual(data["servers"]["memory"]["agents"], ["fake"])
+        self.assertTrue(candidate.exists())
+
+    def test_attach_agent_and_install_raises_when_missing(self):
+        with self.assertRaises(KeyError):
+            sync.attach_agent_and_install(self.profile, {"servers": {}}, "missing")
+
 
 if __name__ == "__main__":
     unittest.main()
