@@ -1,12 +1,13 @@
-"""Tkinter shell over the agent-agnostic core.
+"""Desktop shell over the agent-agnostic core.
 
-Every button delegates to :mod:`mcpmanager` modules; no Agent-specific paths or
-schemas live here.
+The UI intentionally keeps all Agent-specific knowledge in ``agents/*.toml``;
+this module only renders whatever the core reports.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import queue
 import shutil
@@ -14,12 +15,53 @@ import threading
 import tkinter as tk
 import traceback
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import messagebox, simpledialog, ttk
 
-from . import adapters, discovery, doctor, formats, paths, profiles, registry, sync, versioning
+from . import __version__, adapters, discovery, doctor, formats, paths, profiles, registry, sync, versioning
 
-SCAN_RESULT: queue.Queue = queue.Queue()
-SCAN_RUNNING = {"value": False}
+FONT = "Microsoft YaHei UI"
+MONO = "Consolas"
+REPO_URL = "https://github.com/1254084397/mcp-manager"
+
+LIGHT = {
+    "bg": "#f1f5f9",
+    "surface": "#ffffff",
+    "surface2": "#f8fafc",
+    "text": "#0f172a",
+    "muted": "#64748b",
+    "border": "#e2e8f0",
+    "sidebar": "#0f172a",
+    "sidebar_text": "#cbd5e1",
+    "sidebar_active": "#1e293b",
+    "header": "#0f172a",
+    "accent": "#2563eb",
+    "accent_hover": "#1d4ed8",
+    "ok": "#16a34a",
+    "warn": "#d97706",
+    "danger": "#dc2626",
+    "info": "#2563eb",
+    "plugin": "#7c3aed",
+}
+
+DARK = {
+    "bg": "#0b1220",
+    "surface": "#111c2e",
+    "surface2": "#0f172a",
+    "text": "#e2e8f0",
+    "muted": "#94a3b8",
+    "border": "#243247",
+    "sidebar": "#070d18",
+    "sidebar_text": "#94a3b8",
+    "sidebar_active": "#152238",
+    "header": "#070d18",
+    "accent": "#3b82f6",
+    "accent_hover": "#2563eb",
+    "ok": "#4ade80",
+    "warn": "#fbbf24",
+    "danger": "#f87171",
+    "info": "#60a5fa",
+    "plugin": "#c084fc",
+}
 
 
 class App:
@@ -27,216 +69,1150 @@ class App:
         paths.ensure_layout()
         self.profiles = profiles.load_profiles()
         if not self.profiles:
-            raise RuntimeError("没有找到任何 agents/*.toml，无法启动。")
+            raise RuntimeError("没有找到任何 Agent profile，无法启动。")
+
+        self.settings = self._load_settings()
+        self.dark = bool(self.settings.get("dark"))
+        self.agent_id = self.settings.get("agent") if self.settings.get("agent") in self.profiles else (
+            "trae" if "trae" in self.profiles else next(iter(self.profiles))
+        )
+        self.sort_column = "MCP"
+        self.sort_reverse = False
+        self.busy = False
+        self.rows: dict[str, dict] = {}
+        self._themed: list = []
+        self._buttons: list[tuple[tk.Button, str]] = []
+        self._sidebar_rows: dict[str, dict] = {}
+
+        self._enable_dpi()
         self.root = tk.Tk()
-        self.root.title("MCP Manager")
-        self.root.geometry("1180x780")
-        self.root.minsize(980, 640)
+        self.root.title(f"MCP Manager {__version__}")
+        self._apply_geometry()
+        self.root.minsize(980, 620)
         self.root.report_callback_exception = self._report_exception
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        frame = ttk.Frame(self.root, padding=10)
-        frame.pack(fill="both", expand=True)
-
-        ttk.Label(frame, text="MCP Manager", font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w")
-        ttk.Label(
-            frame,
-            text="跨 Agent 扫描、检查、备份与同步 MCP。每个 Agent 的路径和字段差异由 agents/*.toml 描述。\n",
-        ).pack(anchor="w")
-
-        agent_row = ttk.Frame(frame)
-        agent_row.pack(fill="x", pady=(0, 6))
-        ttk.Label(agent_row, text="目标 Agent：").pack(side="left")
-        self.agent_choice = tk.StringVar(value="trae" if "trae" in self.profiles else next(iter(self.profiles)))
-        chooser = ttk.Combobox(
-            agent_row,
-            textvariable=self.agent_choice,
-            values=list(self.profiles),
-            state="readonly",
-            width=20,
-        )
-        chooser.pack(side="left")
-        chooser.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
-        self.agent_status = tk.StringVar(value="")
-        ttk.Label(agent_row, textvariable=self.agent_status).pack(side="left", padx=(12, 0))
-
-        columns = ("MCP", "类型", "版本", "状态", "适用 Agent")
-        tree_frame = ttk.Frame(frame)
-        tree_frame.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=15)
-        for column, width in zip(columns, (200, 150, 120, 250, 340)):
-            self.tree.heading(column, text=column)
-            self.tree.column(column, width=width, anchor="w")
-        scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
-
-        buttons = ttk.Frame(frame)
-        buttons.pack(fill="x", pady=8)
-        actions = (
-            ("刷新状态", self.refresh),
-            ("扫描全部 MCP", self.scan_all),
-            ("添加扫描目录", self.add_scan_folder),
-            ("打开发现报告", self.open_report),
-            ("检查可升级包", self.check_updates),
-            ("更新选中 MCP", self.update_selected),
-            ("修改选中版本", self.edit_version),
-            ("列出 Agent 配置", self.list_agent_configs),
-            ("备份当前配置", self.backup_configs),
-            ("恢复配置备份", self.restore_backup),
-            ("诊断当前 Agent", self.diagnose_current),
-            ("检查运行时", self.check_runtime),
-            ("打开主注册表", self.open_registry),
-            ("打开候选目录", self.open_generated),
-            ("打开数据目录", self.open_data),
-            ("打开目标配置", self.open_selected_config),
-            ("生成候选配置", self.generate_candidate),
-            ("预览当前候选", self.show_candidate_preview),
-        )
-        for index, (label, command) in enumerate(actions):
-            ttk.Button(buttons, text=label, command=command).grid(
-                row=index // 6, column=index % 6, padx=(0, 6), pady=2, sticky="w"
-            )
-
-        self.output = tk.Text(frame, height=9, state="disabled", wrap="word")
-        self.output.pack(fill="both", expand=False)
-
-        self.refresh()
+        self._build_menu()
+        self._build_header()
+        self._build_status()
+        self._build_body()
+        self._bind_keys()
+        self.apply_theme()
+        self.refresh_agents()
+        self.refresh_servers()
+        self.set_status("就绪")
+        self._set_details("在左侧选择 Agent，再选择一条 MCP 查看详情。")
+        self.root.after(250, self._init_sash)
+        if self.settings.get("log_visible", True) is False:
+            self._toggle_log()
+        self.root.after(300, lambda: self.log("就绪。选择左侧 Agent 查看其 MCP。"))
         self.root.mainloop()
 
-    # ------------------------------------------------------------------ ui
-    def log(self, text: str) -> None:
-        self.output.configure(state="normal")
-        self.output.insert("end", text + "\n")
-        self.output.see("end")
-        self.output.configure(state="disabled")
-
-    def _report_exception(self, exc_type, exc_value, exc_tb) -> None:
-        detail = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    # ------------------------------------------------------------------ setup
+    @staticmethod
+    def _enable_dpi() -> None:
+        if os.name != "nt":
+            return
         try:
-            self.log(f"操作失败：{exc_type.__name__}: {exc_value}")
+            from ctypes import windll
+
+            windll.shcore.SetProcessDpiAwareness(1)
         except Exception:
             pass
-        messagebox.showerror("操作失败", f"{exc_type.__name__}: {exc_value}\n\n{detail.strip().splitlines()[-1]}")
 
-    def current_profile(self):
-        return self.profiles.get(self.agent_choice.get()) or next(iter(self.profiles.values()))
+    def _load_settings(self) -> dict:
+        file = paths.DATA_DIR / "settings.json"
+        try:
+            return json.loads(file.read_text(encoding="utf-8-sig"))
+        except Exception:
+            return {}
 
-    def selected_name(self) -> str | None:
-        selection = self.tree.selection()
-        if not selection:
-            messagebox.showinfo("选择 MCP", "请先在列表中选择一个 MCP。")
-            return None
-        return self.tree.item(selection[0], "values")[0]
+    def _apply_geometry(self) -> None:
+        width, height = 1280, 800
+        saved = str(self.settings.get("geometry", ""))
+        try:
+            size = saved.split("+")[0]
+            width, height = (int(part) for part in size.split("x"))
+        except Exception:
+            pass
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        width = max(980, min(width, screen_w - 80))
+        height = max(620, min(height, screen_h - 160))
+        x = max(0, (screen_w - width) // 2)
+        y = max(0, (screen_h - height) // 2 - 20)
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
 
+    def _save_settings(self) -> None:
+        data = {
+            "dark": self.dark,
+            "agent": self.agent_id,
+            "geometry": self.root.geometry(),
+            "log_visible": bool(self.log_box.winfo_manager()),
+        }
+        try:
+            (paths.DATA_DIR / "settings.json").write_text(
+                json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+    def palette(self) -> dict:
+        return DARK if self.dark else LIGHT
+
+    def _theme(self, widget, bg: str | None = None, fg: str | None = None,
+               active_bg: str | None = None, insert: str | None = None) -> None:
+        def apply() -> None:
+            colors = self.palette()
+            options = {}
+            if bg:
+                options["bg"] = colors[bg]
+            if fg:
+                options["fg"] = colors[fg]
+            if active_bg:
+                options["activebackground"] = colors[active_bg]
+            if insert:
+                options["insertbackground"] = colors[insert]
+            if options:
+                widget.configure(**options)
+
+        self._themed.append(apply)
+        apply()
+
+    def _button(self, parent, text: str, command, kind: str = "ghost") -> tk.Button:
+        button = tk.Button(
+            parent,
+            text=text,
+            command=command,
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            font=(FONT, 9),
+            padx=12,
+            pady=6,
+            highlightthickness=0,
+        )
+        self._buttons.append((button, kind))
+        self._paint_button(button, kind)
+        return button
+
+    def _paint_button(self, button: tk.Button, kind: str) -> None:
+        colors = self.palette()
+        if kind == "accent":
+            button.configure(bg=colors["accent"], fg="#ffffff", activebackground=colors["accent_hover"],
+                             activeforeground="#ffffff")
+        elif kind == "header":
+            button.configure(bg=colors["header"], fg=colors["sidebar_text"], activebackground=colors["sidebar_active"],
+                             activeforeground="#ffffff")
+        else:
+            button.configure(bg=colors["surface"], fg=colors["text"], activebackground=colors["surface2"],
+                             activeforeground=colors["text"])
+
+    # ------------------------------------------------------------------- menu
+    def _build_menu(self) -> None:
+        self.menubar = tk.Menu(self.root, tearoff=0)
+        file_menu = tk.Menu(self.menubar, tearoff=0)
+        file_menu.add_command(label="打开数据目录", command=lambda: self._open(paths.DATA_DIR))
+        file_menu.add_command(label="打开主注册表", command=lambda: self._open(paths.REGISTRY_PATH))
+        file_menu.add_command(label="打开候选目录", command=lambda: self._open(paths.GENERATED_DIR))
+        file_menu.add_separator()
+        file_menu.add_command(label="退出", command=self._on_close)
+        self.menubar.add_cascade(label="文件", menu=file_menu)
+
+        action_menu = tk.Menu(self.menubar, tearoff=0)
+        action_menu.add_command(label="刷新", accelerator="F5", command=self.refresh_all)
+        action_menu.add_command(label="扫描全部 MCP", accelerator="Ctrl+R", command=self.scan_all)
+        action_menu.add_command(label="添加扫描目录…", command=self.add_scan_folder)
+        action_menu.add_command(label="打开扫描报告", command=self.open_report)
+        action_menu.add_command(label="检查可升级包", accelerator="Ctrl+U", command=self.check_updates)
+        action_menu.add_separator()
+        action_menu.add_command(label="诊断当前 Agent", accelerator="Ctrl+D", command=self.diagnose_current)
+        action_menu.add_command(label="检查本机运行时", command=self.check_runtime)
+        action_menu.add_separator()
+        action_menu.add_command(label="备份全部配置", command=self.backup_all)
+        action_menu.add_command(label="备份管理…", command=self.open_backup_manager)
+        action_menu.add_separator()
+        action_menu.add_command(label="初始化当前 Agent 配置", command=self.init_config)
+        action_menu.add_command(label="生成候选配置", command=self.generate_candidate)
+        action_menu.add_command(label="应用候选…", command=self.show_candidate_preview)
+        self.menubar.add_cascade(label="操作", menu=action_menu)
+
+        help_menu = tk.Menu(self.menubar, tearoff=0)
+        help_menu.add_command(label="快捷键", command=self.show_shortcuts)
+        help_menu.add_command(label="关于", command=self.show_about)
+        self.menubar.add_cascade(label="帮助", menu=help_menu)
+        self.root.configure(menu=self.menubar)
+        self._menus = [self.menubar, file_menu, action_menu, help_menu]
+
+    # ----------------------------------------------------------------- header
+    def _build_header(self) -> None:
+        self.header = tk.Frame(self.root, height=70)
+        self.header.pack(fill="x")
+        self.header.pack_propagate(False)
+        self._theme(self.header, bg="header")
+
+        self.brand = tk.Label(self.header, text="MCP Manager", font=(FONT, 18, "bold"))
+        self.brand.pack(side="left", padx=(22, 12), pady=16)
+        self._theme(self.brand, bg="header", fg="sidebar_text")
+
+        self.brand_sub = tk.Label(self.header, text="跨 Agent 的 MCP 配置管理", font=(FONT, 9))
+        self.brand_sub.pack(side="left", pady=20)
+        self._theme(self.brand_sub, bg="header", fg="muted")
+
+        self.header_buttons = tk.Frame(self.header)
+        self.header_buttons.pack(side="right", padx=18)
+        self._theme(self.header_buttons, bg="header")
+        for text, command in (
+            ("检查更新", self.check_updates),
+            ("扫描全部", self.scan_all),
+            ("刷新", self.refresh_all),
+            ("主题", self.toggle_theme),
+        ):
+            button = self._button(self.header_buttons, text, command, "header")
+            button.pack(side="right", padx=4)
+
+    # ----------------------------------------------------------------- status
+    def _build_status(self) -> None:
+        self.status = tk.Frame(self.root, height=30)
+        self.status.pack(side="bottom", fill="x")
+        self.status.pack_propagate(False)
+        self._theme(self.status, bg="surface2")
+
+        self.status_left = tk.Label(self.status, text="", font=(FONT, 9), anchor="w")
+        self.status_left.pack(side="left", padx=16)
+        self._theme(self.status_left, bg="surface2", fg="muted")
+
+        self.status_right = tk.Label(self.status, text="", font=(FONT, 9), anchor="e")
+        self.status_right.pack(side="right", padx=16)
+        self._theme(self.status_right, bg="surface2", fg="muted")
+
+        self.progress = ttk.Progressbar(
+            self.status, mode="indeterminate", length=110, style="App.Horizontal.TProgressbar"
+        )
+
+    def set_status(self, text: str) -> None:
+        self.status_left.configure(text=text)
+
+    # ------------------------------------------------------------------- body
+    def _build_body(self) -> None:
+        self.body = tk.Frame(self.root)
+        self.body.pack(fill="both", expand=True)
+        self._theme(self.body, bg="bg")
+
+        self._build_sidebar()
+
+        self.content = tk.Frame(self.body)
+        self.content.pack(side="left", fill="both", expand=True, padx=(18, 18), pady=(14, 8))
+        self._theme(self.content, bg="bg")
+
+        toolbar = tk.Frame(self.content)
+        toolbar.pack(fill="x")
+        self._theme(toolbar, bg="bg")
+
+        tk.Label(toolbar, text="搜索", font=(FONT, 9)).pack(side="left", padx=(0, 6))
+        self._theme(toolbar.winfo_children()[-1], bg="bg", fg="muted")
+
+        self.search_var = tk.StringVar()
+        self.search_var.trace_add("write", lambda *_: self.refresh_servers())
+        self.search_entry = tk.Entry(
+            toolbar, textvariable=self.search_var, relief="flat", font=(FONT, 9), width=26,
+            highlightthickness=1,
+        )
+        self.search_entry.pack(side="left", ipady=5)
+        self._theme(self.search_entry, bg="surface", fg="text", insert="text")
+        self._themed.append(
+            lambda: self.search_entry.configure(highlightbackground=self.palette()["border"],
+                                                highlightcolor=self.palette()["accent"])
+        )
+
+        for text, command, kind in (
+            ("恢复备份", self.open_backup_manager, "ghost"),
+            ("备份全部", self.backup_all, "ghost"),
+            ("应用候选…", self.show_candidate_preview, "ghost"),
+            ("生成候选", self.generate_candidate, "accent"),
+        ):
+            button = self._button(toolbar, text, command, kind)
+            button.pack(side="right", padx=(6, 0))
+
+        self.hint = tk.Label(self.content, text="", font=(FONT, 9), anchor="w")
+        self.hint.pack(fill="x", pady=(8, 6))
+        self._theme(self.hint, bg="bg", fg="muted")
+
+        self.paned = ttk.Panedwindow(self.content, orient="vertical", style="App.TPanedwindow")
+        self.paned.pack(fill="both", expand=True)
+
+        tree_card = tk.Frame(self.paned)
+        self.paned.add(tree_card, weight=4)
+        self._theme(tree_card, bg="surface")
+
+        columns = ("MCP", "类型", "版本", "状态")
+        self.tree = ttk.Treeview(
+            tree_card, columns=columns, show="headings", selectmode="browse", style="App.Treeview", height=9
+        )
+        for column, width in zip(columns, (240, 170, 120, 260)):
+            self.tree.heading(column, text=column, anchor="w", command=lambda c=column: self.sort_by(c))
+            self.tree.column(column, width=width, anchor="w", stretch=(column == "状态"))
+        scroll = ttk.Scrollbar(tree_card, orient="vertical", command=self.tree.yview, style="App.Vertical.TScrollbar")
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
+        scroll.pack(side="right", fill="y", pady=6, padx=(0, 4))
+        self.tree.bind("<<TreeviewSelect>>", self._on_select)
+        self.tree.bind("<Button-3>", self._on_context)
+        self.tree.bind("<Double-1>", lambda _event: self.open_selected_config())
+
+        details_card = tk.Frame(self.paned)
+        self.paned.add(details_card, weight=2)
+        self._theme(details_card, bg="surface")
+
+        details_head = tk.Frame(details_card)
+        details_head.pack(fill="x", padx=12, pady=(8, 0))
+        self._theme(details_head, bg="surface")
+        title = tk.Label(details_head, text="服务详情", font=(FONT, 9, "bold"), anchor="w")
+        title.pack(side="left")
+        self._theme(title, bg="surface", fg="text")
+        copy_button = self._button(details_head, "复制启动命令", self.copy_command, "ghost")
+        copy_button.pack(side="right")
+
+        self.details = tk.Text(
+            details_card, height=5, wrap="word", relief="flat", bd=0, padx=12, pady=8, font=(MONO, 9),
+            state="disabled", highlightthickness=0,
+        )
+        self.details.pack(fill="both", expand=True, padx=6, pady=(4, 8))
+        self._theme(self.details, bg="surface", fg="text", insert="text")
+
+        self._build_log()
+
+    def _build_sidebar(self) -> None:
+        self.sidebar = tk.Frame(self.body, width=238)
+        self.sidebar.pack(side="left", fill="y")
+        self.sidebar.pack_propagate(False)
+        self._theme(self.sidebar, bg="sidebar")
+
+        heading = tk.Label(self.sidebar, text="AGENTS", font=(FONT, 8, "bold"), anchor="w")
+        heading.pack(fill="x", padx=18, pady=(16, 8))
+        self._theme(heading, bg="sidebar", fg="muted")
+
+        for profile in self.profiles.values():
+            row = tk.Frame(self.sidebar, cursor="hand2")
+            row.pack(fill="x", padx=10, pady=1)
+            dot = tk.Label(row, text="●", font=(FONT, 9), width=2)
+            dot.pack(side="left", padx=(6, 0))
+            name = tk.Label(row, text=profile.name, font=(FONT, 9), anchor="w")
+            name.pack(side="left", fill="x", expand=True, pady=6)
+            self._sidebar_rows[profile.id] = {"row": row, "dot": dot, "name": name}
+            for widget in (row, dot, name):
+                widget.bind("<Button-1>", lambda _event, pid=profile.id: self.select_agent(pid))
+            row.bind("<Enter>", lambda _event, pid=profile.id: self._hover_agent(pid, True))
+            row.bind("<Leave>", lambda _event, pid=profile.id: self._hover_agent(pid, False))
+
+        footer = tk.Label(self.sidebar, text=f"数据目录\n{paths.DATA_DIR}", font=(FONT, 8),
+                          justify="left", anchor="w", wraplength=200)
+        footer.pack(side="bottom", fill="x", padx=18, pady=14)
+        self._theme(footer, bg="sidebar", fg="muted")
+
+    def _build_log(self) -> None:
+        self.log_card = tk.Frame(self.content)
+        self.log_card.pack(fill="x", pady=(10, 0))
+        self._theme(self.log_card, bg="bg")
+
+        head = tk.Frame(self.log_card)
+        head.pack(fill="x")
+        self._theme(head, bg="bg")
+        label = tk.Label(head, text="运行日志", font=(FONT, 9, "bold"))
+        label.pack(side="left")
+        self._theme(label, bg="bg", fg="text")
+        self.log_toggle_button = self._button(head, "收起", self._toggle_log, "ghost")
+        self.log_toggle_button.pack(side="right")
+        clear = self._button(head, "清空", self.clear_log, "ghost")
+        clear.pack(side="right", padx=(0, 6))
+
+        self.log_box = tk.Text(
+            self.log_card, height=4, wrap="word", relief="flat", bd=0, padx=12, pady=8,
+            font=(MONO, 9), state="disabled", highlightthickness=0,
+        )
+        self.log_box.pack(fill="x", pady=(6, 0))
+        self._theme(self.log_box, bg="surface2", fg="muted")
+
+    def _hover_agent(self, profile_id: str, active: bool) -> None:
+        if profile_id == self.agent_id:
+            return
+        colors = self.palette()
+        row = self._sidebar_rows[profile_id]
+        color = colors["sidebar_active"] if active else colors["sidebar"]
+        for widget in (row["row"], row["dot"], row["name"]):
+            widget.configure(bg=color)
+
+    def _paint_agent_rows(self) -> None:
+        colors = self.palette()
+        for profile_id, row in self._sidebar_rows.items():
+            selected = profile_id == self.agent_id
+            background = colors["sidebar_active"] if selected else colors["sidebar"]
+            row["row"].configure(bg=background)
+            row["dot"].configure(bg=background, fg=colors["ok"] if self.profiles[profile_id].path.exists() else colors["muted"])
+            row["name"].configure(bg=background, fg="#ffffff" if selected else colors["sidebar_text"],
+                                  font=(FONT, 9, "bold") if selected else (FONT, 9))
+
+    def _init_sash(self) -> None:
+        try:
+            height = self.paned.winfo_height()
+            if height > 200:
+                self.paned.sashpos(0, int(height * 0.6))
+        except tk.TclError:
+            pass
+
+    # ------------------------------------------------------------------ theme
+    def apply_theme(self) -> None:
+        colors = self.palette()
+        self.root.configure(bg=colors["bg"])
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure(
+            "App.Treeview",
+            background=colors["surface"],
+            fieldbackground=colors["surface"],
+            foreground=colors["text"],
+            borderwidth=0,
+            rowheight=31,
+            font=(FONT, 9),
+        )
+        style.map(
+            "App.Treeview",
+            background=[("selected", colors["accent"])],
+            foreground=[("selected", "#ffffff")],
+        )
+        style.configure(
+            "App.Treeview.Heading",
+            background=colors["surface2"],
+            foreground=colors["muted"],
+            relief="flat",
+            font=(FONT, 9, "bold"),
+            padding=(8, 8),
+        )
+        style.map("App.Treeview.Heading", background=[("active", colors["surface2"])])
+        style.configure("App.Horizontal.TProgressbar", troughcolor=colors["surface2"], background=colors["accent"],
+                        borderwidth=0, thickness=6)
+        style.configure("App.TPanedwindow", background=colors["bg"], sashwidth=8, sashrelief="flat")
+        style.configure("App.Vertical.TScrollbar", background=colors["border"], troughcolor=colors["surface"],
+                        bordercolor=colors["surface"], arrowcolor=colors["muted"])
+
+        for apply in self._themed:
+            apply()
+        for button, kind in self._buttons:
+            self._paint_button(button, kind)
+        for menu in self._menus:
+            menu.configure(bg=colors["surface"], fg=colors["text"], activebackground=colors["accent"],
+                           activeforeground="#ffffff", bd=0)
+
+        self.tree.tag_configure("ok", foreground=colors["ok"])
+        self.tree.tag_configure("registered", foreground=colors["info"])
+        self.tree.tag_configure("missing", foreground=colors["muted"])
+        self.tree.tag_configure("plugin", foreground=colors["plugin"])
+        self.tree.tag_configure("warn", foreground=colors["warn"])
+        self.tree.tag_configure("odd", background=colors["surface2"])
+        self.tree.tag_configure("even", background=colors["surface"])
+        self._paint_agent_rows()
+
+    def toggle_theme(self) -> None:
+        self.dark = not self.dark
+        self.apply_theme()
+        self.refresh_servers()
+        self._save_settings()
+        self.log("已切换到" + ("深色" if self.dark else "浅色") + "主题。")
+
+    # ------------------------------------------------------------------ agents
+    def current(self):
+        return self.profiles[self.agent_id]
+
+    def select_agent(self, profile_id: str) -> None:
+        self.agent_id = profile_id
+        self._paint_agent_rows()
+        self.refresh_servers()
+        self._save_settings()
+
+    def refresh_agents(self) -> None:
+        for profile_id, profile in self.profiles.items():
+            exists = profile.path.exists()
+            self._sidebar_rows[profile_id]["dot"].configure(fg=self.palette()["ok"] if exists else self.palette()["muted"])
+        self._paint_agent_rows()
+
+    def refresh_all(self) -> None:
+        self.refresh_agents()
+        self.refresh_servers()
+        self.log("已刷新。")
+
+    # ------------------------------------------------------------------ table
     @staticmethod
-    def tagged_for(profile, spec) -> bool:
+    def _tagged_for(profile, spec) -> bool:
         agents = [str(item).lower() for item in spec.get("agents", [])]
         if "*" in agents:
             return True
         keys = {profile.id.lower(), profile.name.lower(), *(alias.lower() for alias in profile.aliases)}
         return any(agent in keys for agent in agents)
 
-    # -------------------------------------------------------------- refresh
-    def refresh(self) -> None:
+    def refresh_servers(self) -> None:
         for item in self.tree.get_children():
             self.tree.delete(item)
-        profile = self.current_profile()
-        try:
-            data = registry.load()
-        except Exception as exc:
-            self.log(f"注册表读取失败：{exc}")
-            return
-        configured: dict[str, str] = {}
+        self.rows.clear()
+
+        profile = self.current()
+        data = registry.load()
         section: dict = {}
+        error = ""
         if profile.path.exists():
             try:
                 section = formats.read_section(profile.path, profile.format, profile.schema)
-            except Exception as exc:
-                self.log(f"{profile.name} 配置解析失败：{exc}")
-        for name in section:
-            configured.setdefault(registry.canonical(name), name)
+            except Exception as exc:  # noqa: BLE001 - shown in the hint
+                error = f"配置解析失败：{exc}"
+                self.log(error)
 
+        configured = {registry.canonical(name): name for name in section}
         rows = []
-        registered: set[str] = set()
+        registered = set()
         for name, spec in registry.servers(data).items():
             canonical = registry.canonical(name)
             here = canonical in configured
-            if not (self.tagged_for(profile, spec) or here):
+            if not (self._tagged_for(profile, spec) or here):
                 continue
             registered.add(canonical)
             if spec.get("kind") == "copilot-plugin-host":
-                state = "宿主/插件级"
+                state, tag = "宿主/插件级", "plugin"
             elif here:
-                state = "已配置"
+                state, tag = "已配置", "ok"
             else:
-                state = "注册表已登记"
-            rows.append((name, spec, state))
+                state, tag = "注册表已登记", "registered"
+            rows.append((name, spec, state, tag, here))
+
         for name in section:
             if registry.canonical(name) not in registered:
-                rows.append((name, {"kind": "仅配置中发现", "agents": [profile.id]}, "已配置（未登记）"))
+                rows.append((name, {"kind": "仅配置中发现", "agents": [profile.id]}, "已配置（未登记）", "warn", True))
 
-        for name, spec, state in rows:
-            live = section.get(name, spec)
+        for name, spec, state, tag, here in rows:
+            canonical = registry.canonical(name)
+            live = section.get(configured[canonical], spec) if here else spec
             command = adapters.command_of(live)
             if command and (Path(command).exists() or shutil.which(command)):
-                state += " / 路径正常"
+                state += " · 路径正常"
+            elif command:
+                tag = "warn"
+                state += " · 路径缺失"
             field = registry.version_field(spec)
-            version = spec.get(field, "") if field else ""
-            agents = ", ".join(str(item) for item in spec.get("agents", []))
-            self.tree.insert("", "end", values=(name, spec.get("kind", ""), version, state, agents))
+            version = str(spec.get(field, "")) if field else ""
+            self.rows[name] = {
+                "name": name,
+                "spec": spec,
+                "live": live,
+                "state": state,
+                "tag": tag,
+                "version": version,
+                "kind": str(spec.get("kind", "")),
+            }
 
-        self.agent_status.set(
-            f"{profile.name} | 配置：{profile.path} | 已配置 {len(section)} 项；显示 {len(rows)} 项"
-        )
-        self.log(f"已刷新 {profile.name}：显示 {len(rows)} 项，当前配置 {len(section)} 项。")
+        needle = self.search_var.get().strip().lower()
+        ordered = list(self.rows.values())
+        key = {
+            "MCP": lambda row: row["name"].lower(),
+            "类型": lambda row: row["kind"].lower(),
+            "版本": lambda row: row["version"],
+            "状态": lambda row: row["state"],
+        }.get(self.sort_column, lambda row: row["name"].lower())
+        ordered.sort(key=key, reverse=self.sort_reverse)
 
-    # --------------------------------------------------------------- scan
-    def scan_all(self) -> None:
-        if SCAN_RUNNING["value"]:
-            self.log("扫描仍在进行，请稍候……")
+        for index, row in enumerate(ordered):
+            if needle and needle not in f"{row['name']} {row['kind']} {row['state']}".lower():
+                continue
+            self.tree.insert(
+                "", "end", iid=row["name"], values=(row["name"], row["kind"], row["version"], row["state"]),
+                tags=(row["tag"], "odd" if index % 2 else "even"),
+            )
+
+        if error:
+            self.hint.configure(text=error, fg=self.palette()["danger"])
+        elif not profile.path.exists():
+            self.hint.configure(
+                text=f"{profile.name} 还没有配置文件：{profile.path}  ·  可在“操作”菜单中初始化配置。",
+                fg=self.palette()["warn"],
+            )
+        else:
+            self.hint.configure(
+                text=f"{profile.name}  ·  {profile.path}  ·  已配置 {len(section)} 项",
+                fg=self.palette()["muted"],
+            )
+        self.status_right.configure(text=f"{profile.name} · 显示 {len(self.tree.get_children())} / {len(self.rows)} 项")
+
+    def sort_by(self, column: str) -> None:
+        if self.sort_column == column:
+            self.sort_reverse = not self.sort_reverse
+        else:
+            self.sort_column = column
+            self.sort_reverse = False
+        self.refresh_servers()
+
+    def selected_name(self) -> str | None:
+        selection = self.tree.selection()
+        if not selection:
+            messagebox.showinfo("选择 MCP", "请先在列表中选择一个 MCP。", parent=self.root)
+            return None
+        return self.tree.item(selection[0], "values")[0]
+
+    def _on_select(self, _event=None) -> None:
+        selection = self.tree.selection()
+        if not selection:
+            self._set_details("")
             return
-        SCAN_RUNNING["value"] = True
-        self.log("开始扫描 MCP 配置……")
+        row = self.rows.get(str(selection[0]))
+        if row:
+            self._set_details(self._describe(row))
 
-        def worker():
-            try:
-                data = registry.load()
-                profile_paths = [item.path for item in self.profiles.values()]
-                report, unknown = discovery.scan_report(data, profile_paths)
-                target = paths.REPORT_DIR / "discovery-report.json"
-                import json
+    def _describe(self, row: dict) -> str:
+        profile = self.current()
+        live = row["live"]
+        spec = row["spec"]
+        lines = [
+            f"名称        {row['name']}",
+            f"状态        {row['state']}",
+            f"注册表      {'已登记' if spec.get('kind') != '仅配置中发现' else '未登记'}",
+            f"类型        {row['kind'] or '-'}",
+        ]
+        command = adapters.command_of(live)
+        args = adapters.args_of(live)
+        url = adapters.url_of(live, profile)
+        if command:
+            lines.append(f"命令        {command}")
+        if args:
+            lines.append(f"参数        {' '.join(args)}")
+        if url:
+            lines.append(f"地址        {url}")
+        env = live.get(profile.env) or live.get("env") or live.get("environment") or {}
+        if isinstance(env, dict) and env:
+            lines.append("环境变量")
+            for key, value in env.items():
+                secret = any(marker in str(key).lower() for marker in adapters.SECRET_MARKERS)
+                lines.append(f"  {key} = {'***' if secret else value}")
+        lines.append(f"来源        {profile.path}")
+        return "\n".join(lines)
 
-                target.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-                SCAN_RESULT.put(("ok", (report, unknown, target)))
-            except Exception as exc:  # noqa: BLE001 - forwarded to UI
-                SCAN_RESULT.put(("error", exc))
+    def _set_details(self, text: str) -> None:
+        self.details.configure(state="normal")
+        self.details.delete("1.0", "end")
+        self.details.insert("end", text)
+        self.details.configure(state="disabled")
 
-        threading.Thread(target=worker, daemon=True).start()
-        self.root.after(200, self.poll_scan)
+    def _style_table(self, table: ttk.Treeview) -> None:
+        colors = self.palette()
+        for tag, role in (("ok", "ok"), ("registered", "info"), ("missing", "muted"),
+                          ("plugin", "plugin"), ("warn", "warn")):
+            table.tag_configure(tag, foreground=colors[role])
 
-    def poll_scan(self) -> None:
+    # ----------------------------------------------------------- context menu
+    def _on_context(self, event) -> None:
+        item = self.tree.identify_row(event.y)
+        if not item:
+            return
+        self.tree.selection_set(item)
+        name = self.tree.item(item, "values")[0]
+        profile = self.current()
+        menu = tk.Menu(self.root, tearoff=0)
+        colors = self.palette()
+        menu.configure(bg=colors["surface"], fg=colors["text"], activebackground=colors["accent"],
+                       activeforeground="#ffffff", bd=0)
+        menu.add_command(label="复制启动命令", command=self.copy_command)
+        menu.add_command(label="诊断此 MCP", command=lambda: self.diagnose_one(name))
+        menu.add_separator()
+        menu.add_command(label="修改版本登记", command=self.edit_version)
+        menu.add_command(label="更新此 MCP", command=self.update_selected)
+        menu.add_command(label="从注册表移除", command=lambda: self.remove_server(name))
+        menu.add_separator()
+        menu.add_command(label="打开 Agent 配置", command=self.open_selected_config)
+        menu.add_command(label="打开所在目录", command=lambda: self._open(profile.path.parent))
         try:
-            status, payload = SCAN_RESULT.get_nowait()
-        except queue.Empty:
-            self.root.after(200, self.poll_scan)
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def copy_command(self) -> None:
+        name = self.tree.selection()
+        if not name:
             return
-        SCAN_RUNNING["value"] = False
-        if status == "error":
-            self.log(f"扫描失败：{payload}")
-            messagebox.showerror("扫描失败", str(payload))
+        row = self.rows.get(str(self.tree.item(name[0], "values")[0]))
+        if not row:
             return
+        command = adapters.command_of(row["live"])
+        parts = [command] if command else []
+        parts += adapters.args_of(row["live"])
+        if not parts:
+            url = adapters.url_of(row["live"], self.current())
+            parts = [url] if url else []
+        text = " ".join(part for part in parts if part)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.log("已复制：" + text)
+
+    def diagnose_one(self, name: str) -> None:
+        row = self.rows.get(name)
+        if not row:
+            return
+        try:
+            result = doctor.diagnose_server(self.current(), name, row["live"])
+        except Exception as exc:  # noqa: BLE001 - shown to the user
+            messagebox.showerror("诊断失败", str(exc), parent=self.root)
+            return
+        state = "正常" if result["available"] else "异常"
+        text = f"{name}\n状态：{state}\n详情：{result['detail']}"
+        if result["problems"]:
+            text += "\n问题：\n- " + "\n- ".join(result["problems"])
+        messagebox.showinfo("诊断结果", text, parent=self.root)
+
+    def remove_server(self, name: str) -> None:
+        data = registry.load()
+        if registry.entry(data, name) is None:
+            messagebox.showinfo("未登记", f"{name} 不在主注册表中。", parent=self.root)
+            return
+        if not messagebox.askyesno("确认移除", f"从主注册表移除 {name}？\n不会修改 Agent 配置文件。", parent=self.root):
+            return
+        registry.remove_server(data, name)
+        registry.save(data)
+        self.refresh_servers()
+        self.log(f"已从注册表移除 {name}。")
+
+    # ------------------------------------------------------------- candidates
+    def generate_candidate(self) -> None:
+        profile = self.current()
+        if not profile.path.exists():
+            if messagebox.askyesno(
+                "初始化配置", f"{profile.name} 还没有配置文件：\n{profile.path}\n\n现在创建吗？", parent=self.root
+            ):
+                self.init_config()
+            return
+        try:
+            candidate = sync.build_candidate(profile, registry.load())
+        except Exception as exc:  # noqa: BLE001 - surfaced to the user
+            self.log(f"生成候选失败：{exc}")
+            messagebox.showerror("生成候选失败", str(exc), parent=self.root)
+            return
+        self.log(f"已生成候选：{candidate.path}")
+        self.show_preview(candidate.path)
+
+    def show_candidate_preview(self) -> None:
+        self.show_preview(sync.candidate_path(self.current()))
+
+    def show_preview(self, path: Path) -> None:
+        if not path.exists():
+            messagebox.showinfo("没有候选配置", "请先点击“生成候选”。", parent=self.root)
+            return
+        candidate = sync.load_candidate(path)
+        fresh = sync.is_fresh(candidate)
+        colors = self.palette()
+        window = tk.Toplevel(self.root)
+        window.title(f"候选预览 - {candidate.get('agentName', candidate['agent'])}")
+        window.geometry("860x600")
+        window.configure(bg=colors["bg"])
+
+        header = tk.Frame(window, height=54, bg=colors["header"])
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        tk.Label(header, text="候选配置预览", bg=colors["header"], fg="#ffffff",
+                 font=(FONT, 12, "bold")).pack(side="left", padx=16)
+        tk.Label(header, text=f"{candidate.get('agentName', candidate['agent'])} · "
+                              f"{len(candidate['servers'])} 个 MCP", bg=colors["header"],
+                 fg=colors["sidebar_text"], font=(FONT, 9)).pack(side="left", padx=8)
+
+        info = tk.Frame(window, bg=colors["bg"])
+        info.pack(fill="x", padx=16, pady=(12, 6))
+        tk.Label(info, text=f"目标：{candidate['targetPath']}", bg=colors["bg"], fg=colors["muted"],
+                 font=(FONT, 9), wraplength=800, justify="left").pack(anchor="w")
+        tk.Label(info, text="源配置未变化，可以应用" if fresh else "源配置已变化，请重新生成",
+                 bg=colors["bg"], fg=colors["ok"] if fresh else colors["danger"],
+                 font=(FONT, 9, "bold")).pack(anchor="w", pady=(4, 0))
+
+        box = tk.Text(window, wrap="none", relief="flat", bd=0, padx=12, pady=10,
+                      font=(MONO, 9), bg=colors["surface"], fg=colors["text"], highlightthickness=0)
+        box.pack(fill="both", expand=True, padx=16, pady=8)
+        box.insert("end", json.dumps(candidate["servers"], ensure_ascii=False, indent=2))
+        box.configure(state="disabled")
+
+        actions = tk.Frame(window, bg=colors["bg"])
+        actions.pack(fill="x", padx=16, pady=(0, 14))
+        tk.Button(actions, text="关闭", command=window.destroy, relief="flat", bd=0, padx=14, pady=7,
+                  bg=colors["surface"], fg=colors["text"], font=(FONT, 9), cursor="hand2").pack(side="right")
+        tk.Button(actions, text="应用到 Agent", relief="flat", bd=0, padx=14, pady=7,
+                  bg=colors["accent"], fg="#ffffff", activebackground=colors["accent_hover"],
+                  activeforeground="#ffffff", font=(FONT, 9), cursor="hand2",
+                  command=lambda: self.apply_candidate(path, window)).pack(side="right", padx=8)
+
+    def apply_candidate(self, path: Path, window: tk.Toplevel | None = None) -> None:
+        parent = window or self.root
+        candidate = sync.load_candidate(path)
+        if not sync.is_fresh(candidate):
+            messagebox.showwarning("配置已变化", "目标配置在生成候选后发生变化，请重新生成。", parent=parent)
+            return
+        if not messagebox.askyesno(
+            "确认应用",
+            f"将先备份，再仅替换 MCP 区块。\n\nAgent：{candidate.get('agentName', candidate['agent'])}\n"
+            f"配置：{candidate['targetPath']}\nMCP 数量：{len(candidate['servers'])}\n\n继续吗？",
+            parent=parent,
+        ):
+            return
+        try:
+            backup, mode = sync.apply_candidate(path)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the user
+            messagebox.showerror("应用失败", str(exc), parent=parent)
+            self.log(f"应用失败：{exc}")
+            return
+        self.log(f"已应用（{mode}）；备份：{backup or '无'}")
+        messagebox.showinfo("应用完成", f"配置已写入。\n备份：{backup or '目标为新建文件'}", parent=parent)
+        if window is not None:
+            window.destroy()
+        self.refresh_all()
+
+    def init_config(self) -> None:
+        profile = self.current()
+        if profile.path.exists():
+            messagebox.showinfo("配置已存在", f"{profile.name} 已有配置文件：\n{profile.path}", parent=self.root)
+            self._open(profile.path)
+            return
+        profile.path.parent.mkdir(parents=True, exist_ok=True)
+        if profile.format == "toml":
+            text = f"[{profile.schema}]\n"
+        else:
+            text = json.dumps({profile.schema: {}}, ensure_ascii=False, indent=2) + "\n"
+        profile.path.write_text(text, encoding="utf-8")
+        self.log(f"已创建 {profile.name} 配置：{profile.path}")
+        self.refresh_all()
+        self._open(profile.path)
+
+    # ---------------------------------------------------------------- versions
+    def check_updates(self) -> None:
+        data = registry.load()
+        targets = [(name, spec) for name, spec in registry.servers(data).items() if spec.get("package")]
+        if not targets:
+            messagebox.showinfo("没有可检查项", "主注册表里没有登记 package 的 MCP。", parent=self.root)
+            return
+
+        def work():
+            results = []
+            for name, spec in targets:
+                field = registry.version_field(spec)
+                current = str(spec.get(field, "")) if field else ""
+                try:
+                    latest = versioning.latest_version(spec)
+                    results.append((name, str(spec.get("package")), current, latest, latest != current))
+                except Exception as exc:  # noqa: BLE001 - shown in the table
+                    results.append((name, str(spec.get("package")), current, f"查询失败：{exc}", False))
+            return results
+
+        self.run_task("正在查询 npm / PyPI 版本…", work, self._show_updates)
+
+    def _show_updates(self, results: list) -> None:
+        colors = self.palette()
+        window = tk.Toplevel(self.root)
+        window.title("可升级 MCP")
+        window.geometry("760x460")
+        window.configure(bg=colors["bg"])
+        tk.Label(window, text="版本检查结果", bg=colors["bg"], fg=colors["text"],
+                 font=(FONT, 12, "bold")).pack(anchor="w", padx=16, pady=(14, 2))
+        updatable = [item for item in results if item[4]]
+        tk.Label(window, text=f"发现 {len(updatable)} 个可更新项，共检查 {len(results)} 个包。",
+                 bg=colors["bg"], fg=colors["muted"], font=(FONT, 9)).pack(anchor="w", padx=16, pady=(0, 8))
+
+        frame = tk.Frame(window, bg=colors["bg"])
+        frame.pack(fill="both", expand=True, padx=16)
+        columns = ("MCP", "包", "当前", "最新")
+        table = ttk.Treeview(frame, columns=columns, show="headings", style="App.Treeview")
+        for column, width in zip(columns, (160, 240, 130, 180)):
+            table.heading(column, text=column)
+            table.column(column, width=width, anchor="w")
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=table.yview, style="App.Vertical.TScrollbar")
+        table.configure(yscrollcommand=scroll.set)
+        table.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        for name, package, current, latest, is_new in results:
+            table.insert("", "end", values=(name, package, current or "-", latest),
+                         tags=("warn",) if is_new else ("missing",))
+        self._style_table(table)
+
+        tk.Button(window, text="关闭", command=window.destroy, relief="flat", bd=0, padx=14, pady=7,
+                  bg=colors["surface"], fg=colors["text"], font=(FONT, 9), cursor="hand2").pack(
+            side="right", padx=16, pady=12)
+        for item in results:
+            self.log(f"{item[0]}：{item[2] or '未登记'} -> {item[3]}")
+        if updatable:
+            self.log("可更新：" + "、".join(item[0] for item in updatable))
+
+    def update_selected(self) -> None:
+        name = self.selected_name()
+        if not name:
+            return
+        data = registry.load()
+        spec = registry.entry(data, name)
+        if spec is None:
+            messagebox.showerror("未登记", f"{name} 只在 Agent 配置中发现，不在主注册表中。", parent=self.root)
+            return
+        package, field = spec.get("package"), registry.version_field(spec)
+        if not package or not field:
+            messagebox.showinfo("无法自动更新", f"{name} 不是包管理器安装的 MCP。", parent=self.root)
+            return
+        self.run_task(
+            f"正在查询 {name} 的最新版本…",
+            lambda: versioning.latest_version(spec),
+            lambda latest: self._confirm_update(name, str(latest)),
+        )
+
+    def _confirm_update(self, name: str, latest: str) -> None:
+        data = registry.load()
+        spec = registry.entry(data, name)
+        field = registry.version_field(spec) if spec else None
+        if spec is None or not field:
+            messagebox.showerror("未登记", f"{name} 已不在主注册表中。", parent=self.root)
+            return
+        package = spec.get("package")
+        current = spec.get(field, "")
+        if registry.normalize_version(latest) == registry.normalize_version(current):
+            messagebox.showinfo("已是最新", f"{name} 当前版本 {current} 已是官方最新版本。", parent=self.root)
+            return
+        if spec.get("kind") == "npm-global":
+            if not messagebox.askyesno(
+                "全局安装", f"将执行：\n\nnpm install -g {package}@{latest}\n\n继续吗？", parent=self.root
+            ):
+                return
+
+            def work():
+                return versioning.npm_install_global(package, latest)
+
+            self.run_task(
+                f"正在安装 {package}@{latest}…",
+                work,
+                lambda result: self._after_install(name, latest, result),
+            )
+            return
+        if not messagebox.askyesno(
+            "更新版本登记",
+            f"{name}\n当前 {current or '未登记'} -> {latest}\n\n写入主注册表并重新生成候选，不会直接改 Agent。继续吗？",
+            parent=self.root,
+        ):
+            return
+        self._finish_update(name, latest)
+
+    def _after_install(self, name: str, latest: str, result) -> None:
+        ok, detail = result
+        if detail:
+            self.log(detail[-1500:])
+        if not ok:
+            messagebox.showerror("安装失败", "npm install 失败，详情见日志。", parent=self.root)
+            return
+        self._finish_update(name, latest)
+
+    def _finish_update(self, name: str, latest: str) -> None:
+        data = registry.load()
+        spec = registry.entry(data, name)
+        field = registry.version_field(spec) if spec else None
+        if spec is None or not field:
+            messagebox.showerror("未登记", f"{name} 已不在主注册表中。", parent=self.root)
+            return
+        spec[field] = latest
+        registry.save(data)
+        self.log(f"{name}：注册表版本已更新为 {latest}。")
+        try:
+            candidate = sync.build_candidate(self.current(), data)
+            self.log(f"已重新生成候选：{candidate.path}")
+            messagebox.showinfo("更新完成", f"{name} 已更新到 {latest}。\n候选：{candidate.path}", parent=self.root)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the user
+            messagebox.showinfo("更新完成", f"{name} 已更新到 {latest}。候选生成失败：{exc}", parent=self.root)
+        self.refresh_all()
+
+    def edit_version(self) -> None:
+        name = self.selected_name()
+        if not name:
+            return
+        data = registry.load()
+        spec = registry.entry(data, name)
+        if spec is None:
+            messagebox.showinfo("未登记", f"{name} 不在主注册表中，请先登记。", parent=self.root)
+            return
+        field = registry.version_field(spec)
+        if not field:
+            messagebox.showinfo("无版本字段", f"{name} 没有可编辑的版本字段。", parent=self.root)
+            return
+        value = simpledialog.askstring("设置版本", f"输入 {name} 的版本：", initialvalue=spec.get(field, ""),
+                                       parent=self.root)
+        if not value or not value.strip():
+            return
+        spec[field] = value.strip()
+        registry.save(data)
+        self.refresh_servers()
+        self.log(f"已更新 {name} 的版本登记为 {value.strip()}。尚未应用到 Agent。")
+
+    # ---------------------------------------------------------------- backups
+    def backup_all(self) -> None:
+        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        paths.BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        count = 0
+        for profile in self.profiles.values():
+            if profile.path.exists():
+                suffix = profile.path.suffix or ".json"
+                shutil.copy2(profile.path, paths.BACKUP_DIR / f"{profile.id}-{stamp}{suffix}")
+                count += 1
+        self.log(f"已备份 {count} 份配置，时间戳：{stamp}")
+        messagebox.showinfo("备份完成", f"已备份 {count} 份配置到：\n{paths.BACKUP_DIR}", parent=self.root)
+
+    def open_backup_manager(self) -> None:
+        colors = self.palette()
+        window = tk.Toplevel(self.root)
+        window.title("备份管理")
+        window.geometry("760x480")
+        window.configure(bg=colors["bg"])
+        tk.Label(window, text="配置备份", bg=colors["bg"], fg=colors["text"],
+                 font=(FONT, 12, "bold")).pack(anchor="w", padx=16, pady=(14, 2))
+        tk.Label(window, text=str(paths.BACKUP_DIR), bg=colors["bg"], fg=colors["muted"],
+                 font=(FONT, 9)).pack(anchor="w", padx=16, pady=(0, 8))
+
+        frame = tk.Frame(window, bg=colors["bg"])
+        frame.pack(fill="both", expand=True, padx=16)
+        columns = ("文件", "大小", "时间")
+        table = ttk.Treeview(frame, columns=columns, show="headings", style="App.Treeview")
+        for column, width in zip(columns, (420, 90, 180)):
+            table.heading(column, text=column)
+            table.column(column, width=width, anchor="w")
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=table.yview, style="App.Vertical.TScrollbar")
+        table.configure(yscrollcommand=scroll.set)
+        table.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        def reload() -> None:
+            for item in table.get_children():
+                table.delete(item)
+            files = sorted(paths.BACKUP_DIR.glob("*"), key=lambda item: item.stat().st_mtime, reverse=True)
+            for file in files:
+                if not file.is_file():
+                    continue
+                stat = file.stat()
+                table.insert("", "end", iid=str(file), values=(
+                    file.name,
+                    f"{stat.st_size / 1024:.1f} KB",
+                    dt.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                ))
+
+        def restore() -> None:
+            selection = table.selection()
+            if not selection:
+                messagebox.showinfo("选择备份", "请先选择一个备份文件。", parent=window)
+                return
+            self._restore_backup(Path(selection[0]))
+            reload()
+
+        actions = tk.Frame(window, bg=colors["bg"])
+        actions.pack(fill="x", padx=16, pady=12)
+        for text, command, kind in (
+            ("恢复选中", restore, "accent"),
+            ("打开目录", lambda: self._open(paths.BACKUP_DIR), "ghost"),
+            ("刷新", reload, "ghost"),
+        ):
+            tk.Button(actions, text=text, command=command, relief="flat", bd=0, padx=14, pady=7,
+                      bg=colors["accent"] if kind == "accent" else colors["surface"],
+                      fg="#ffffff" if kind == "accent" else colors["text"],
+                      activebackground=colors["accent_hover"] if kind == "accent" else colors["surface2"],
+                      activeforeground="#ffffff" if kind == "accent" else colors["text"],
+                      font=(FONT, 9), cursor="hand2").pack(side="left", padx=(0, 8))
+        tk.Button(actions, text="关闭", command=window.destroy, relief="flat", bd=0, padx=14, pady=7,
+                  bg=colors["surface"], fg=colors["text"], font=(FONT, 9), cursor="hand2").pack(side="right")
+        reload()
+
+    def _restore_backup(self, backup: Path) -> None:
+        stem = backup.stem.lower()
+        candidates = [
+            profile for profile in self.profiles.values()
+            if stem.startswith(profile.id.lower()) or profile.name.lower().replace(" ", "-") in stem
+        ]
+        candidates.sort(key=lambda profile: len(profile.id), reverse=True)
+        if not candidates or (len(candidates) > 1 and len(candidates[0].id) == len(candidates[1].id)):
+            messagebox.showerror("无法识别", f"备份文件名无法唯一对应到 Agent：\n{backup.name}", parent=self.root)
+            return
+        profile = candidates[0]
+        if not messagebox.askyesno(
+            "确认恢复", f"将用备份覆盖：\n{profile.path}\n\n恢复前会再备份当前文件。继续吗？", parent=self.root
+        ):
+            return
+        if profile.path.exists():
+            stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            shutil.copy2(profile.path, paths.BACKUP_DIR / f"{profile.id}-before-restore-{stamp}{profile.path.suffix}")
+        profile.path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(backup, profile.path)
+        self.log(f"已恢复：{profile.path}")
+        self.refresh_all()
+
+    # ------------------------------------------------------------- diagnostics
+    def diagnose_current(self) -> None:
+        profile = self.current()
+        try:
+            rows = doctor.diagnose(profile)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the user
+            messagebox.showerror("诊断失败", str(exc), parent=self.root)
+            return
+        colors = self.palette()
+        window = tk.Toplevel(self.root)
+        window.title(f"诊断 - {profile.name}")
+        window.geometry("760x460")
+        window.configure(bg=colors["bg"])
+        tk.Label(window, text=f"{profile.name} 诊断", bg=colors["bg"], fg=colors["text"],
+                 font=(FONT, 12, "bold")).pack(anchor="w", padx=16, pady=(14, 2))
+        tk.Label(window, text=str(profile.path), bg=colors["bg"], fg=colors["muted"],
+                 font=(FONT, 9)).pack(anchor="w", padx=16, pady=(0, 8))
+        frame = tk.Frame(window, bg=colors["bg"])
+        frame.pack(fill="both", expand=True, padx=16)
+        columns = ("MCP", "状态", "详情")
+        table = ttk.Treeview(frame, columns=columns, show="headings", style="App.Treeview")
+        for column, width in zip(columns, (160, 80, 460)):
+            table.heading(column, text=column)
+            table.column(column, width=width, anchor="w")
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=table.yview, style="App.Vertical.TScrollbar")
+        table.configure(yscrollcommand=scroll.set)
+        table.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        for row in rows:
+            state = "正常" if row["available"] else "异常"
+            table.insert("", "end", values=(row["name"], state, row["detail"]),
+                         tags=("ok",) if row["available"] else ("warn",))
+        self._style_table(table)
+        tk.Button(window, text="关闭", command=window.destroy, relief="flat", bd=0, padx=14, pady=7,
+                  bg=colors["surface"], fg=colors["text"], font=(FONT, 9), cursor="hand2").pack(
+            side="right", padx=16, pady=12)
+        self.log(f"{profile.name} 诊断完成：{len(rows)} 项。")
+
+    def check_runtime(self) -> None:
+        rows = doctor.environment_report()
+        text = "\n".join(f"{row['name']:10} {'正常' if row['available'] else '缺失':4} {row['path']}" for row in rows)
+        text += f"\n\n数据目录：{paths.DATA_DIR}"
+        messagebox.showinfo("本机运行时", text, parent=self.root)
+        self.log("运行时检查完成。")
+
+    # ------------------------------------------------------------------- scan
+    def scan_all(self) -> None:
+        def work():
+            data = registry.load()
+            profile_paths = [profile.path for profile in self.profiles.values()]
+            report, unknown = discovery.scan_report(data, profile_paths)
+            target = paths.REPORT_DIR / "discovery-report.json"
+            target.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            return report, unknown, target
+
+        self.run_task("正在扫描本机 MCP 配置…", work, self._show_scan)
+
+    def _show_scan(self, payload) -> None:
         report, unknown, target = payload
         self.log(f"扫描到 {len(report['configFiles'])} 个有效配置，{len(report['discoveredServers'])} 个 MCP 名称。")
         self.log("未登记 MCP：" + (", ".join(unknown) if unknown else "无"))
-        self.log("发现报告：" + str(target))
+        self.log("报告：" + str(target))
         if unknown:
-            messagebox.showwarning("发现未登记 MCP", "发现未登记 MCP：\n" + "\n".join(unknown))
+            messagebox.showwarning("发现未登记 MCP", "发现未登记 MCP：\n" + "\n".join(unknown), parent=self.root)
         else:
-            messagebox.showinfo("扫描完成", "未发现主注册表之外的 MCP。")
+            messagebox.showinfo("扫描完成", "未发现主注册表之外的 MCP。", parent=self.root)
 
     def add_scan_folder(self) -> None:
-        folder = filedialog.askdirectory(title="选择要纳入 MCP 扫描的目录")
+        from tkinter import filedialog
+
+        folder = filedialog.askdirectory(title="选择要纳入 MCP 扫描的目录", parent=self.root)
         if not folder:
             return
         paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -254,272 +1230,129 @@ class App:
         if target.exists():
             self._open(target)
         else:
-            self.log("还没有发现报告，请先点击“扫描全部 MCP”。")
+            messagebox.showinfo("没有报告", "还没有扫描报告，请先执行“扫描全部 MCP”。", parent=self.root)
 
-    # ------------------------------------------------------------ versions
-    def check_updates(self) -> None:
-        data = registry.load()
-        targets = [(name, spec) for name, spec in registry.servers(data).items() if spec.get("package")]
-        if not targets:
-            self.log("主注册表里没有登记 package 的 MCP。")
+    # -------------------------------------------------------------- async task
+    def run_task(self, label: str, work, on_done) -> None:
+        if self.busy:
+            self.log("已有任务在执行，请稍候。")
             return
-        self.log("正在查询版本（npm / PyPI），请稍候……")
-        self.root.update_idletasks()
-        updatable = []
-        for name, spec in targets:
-            field = registry.version_field(spec)
-            current = spec.get(field, "") if field else ""
+        self.busy = True
+        self.set_status(label)
+        self.progress.pack(side="right", padx=(0, 8), pady=6)
+        self.progress.start(12)
+        result: queue.Queue = queue.Queue()
+
+        def worker() -> None:
             try:
-                latest = versioning.latest_version(spec)
-            except Exception as exc:  # noqa: BLE001 - reported inline
-                self.log(f"{name}（{spec['package']}）：查询失败 —— {exc}")
-                continue
-            if registry.normalize_version(latest) == registry.normalize_version(current):
-                self.log(f"{name}（{spec['package']}）：已是最新 {current}")
-            else:
-                updatable.append(name)
-                self.log(f"{name}（{spec['package']}）：当前 {current or '未登记'} -> 最新 {latest}")
-        self.log("可更新：" + ("、".join(updatable) if updatable else "无"))
+                result.put(("ok", work()))
+            except Exception as exc:  # noqa: BLE001 - forwarded to the UI thread
+                result.put(("error", exc))
 
-    def update_selected(self) -> None:
-        name = self.selected_name()
-        if not name:
-            return
-        data = registry.load()
-        spec = registry.entry(data, name)
-        if spec is None:
-            messagebox.showerror("未登记", f"{name} 只在 Agent 配置中发现，不在主注册表中。")
-            return
-        package, field = spec.get("package"), registry.version_field(spec)
-        if not package or not field:
-            messagebox.showinfo("无法自动更新", f"{name} 不是包管理器安装的 MCP。")
-            return
-        try:
-            latest = versioning.latest_version(spec)
-        except Exception as exc:  # noqa: BLE001 - reported inline
-            self.log(f"{name}：版本查询失败 —— {exc}")
-            messagebox.showerror("版本查询失败", str(exc))
-            return
-        current = spec.get(field, "")
-        if registry.normalize_version(latest) == registry.normalize_version(current):
-            messagebox.showinfo("已是最新", f"{name} 当前版本 {current} 已是官方最新版本。")
-            return
-        if spec.get("kind") == "npm-global":
-            if not messagebox.askyesno("全局安装", f"将执行：\n\nnpm install -g {package}@{latest}\n\n继续吗？"):
-                return
-            self.log(f"正在执行 npm install -g {package}@{latest} ……")
-            self.root.update_idletasks()
-            ok, detail = versioning.npm_install_global(package, latest)
-            if detail:
-                self.log(detail[-1500:])
-            if not ok:
-                messagebox.showerror("安装失败", "npm install 失败，详情见日志区。")
-                return
-        elif not messagebox.askyesno(
-            "更新版本登记",
-            f"{name}\n当前 {current or '未登记'} -> {latest}\n\n写入主注册表并重新生成候选，不会直接改 Agent。继续吗？",
-        ):
-            return
-        spec[field] = latest
-        registry.save(data)
-        self.log(f"{name}：注册表版本已更新为 {latest}。")
-        try:
-            candidate = sync.build_candidate(self.current_profile(), data)
-            self.refresh()
-            self.log(f"已重新生成候选：{candidate.path}")
-            messagebox.showinfo("更新完成", f"{name} 已更新到 {latest}。\n候选：{candidate.path}\n确认后再应用。")
-        except Exception as exc:  # noqa: BLE001 - reported inline
-            self.refresh()
-            messagebox.showinfo("更新完成", f"{name} 已更新到 {latest}。候选生成失败：{exc}")
+        threading.Thread(target=worker, daemon=True).start()
 
-    def edit_version(self) -> None:
-        name = self.selected_name()
-        if not name:
-            return
-        data = registry.load()
-        spec = registry.entry(data, name)
-        if spec is None:
-            messagebox.showinfo("未登记", f"{name} 不在主注册表中，请先登记。")
-            return
-        field = registry.version_field(spec)
-        if not field:
-            messagebox.showinfo("无版本字段", f"{name} 没有可编辑的版本字段。")
-            return
-        value = simpledialog.askstring("设置版本", f"输入 {name} 的版本：", initialvalue=spec.get(field, ""))
-        if not value or not value.strip():
-            return
-        spec[field] = value.strip()
-        registry.save(data)
-        self.refresh()
-        self.log(f"已更新 {name} 的版本登记为 {value.strip()}。尚未应用到 Agent。")
-
-    # ---------------------------------------------------------- candidates
-    def generate_candidate(self) -> None:
-        try:
-            candidate = sync.build_candidate(self.current_profile(), registry.load())
-        except Exception as exc:  # noqa: BLE001 - reported inline
-            self.log(f"生成候选失败：{exc}")
-            messagebox.showerror("生成候选失败", str(exc))
-            return
-        self.log(f"已生成候选：{candidate.path}")
-        self.show_preview(candidate.path)
-
-    def show_candidate_preview(self) -> None:
-        self.show_preview(sync.candidate_path(self.current_profile()))
-
-    def show_preview(self, path: Path) -> None:
-        if not path.exists():
-            messagebox.showinfo("没有候选配置", "请先点击“生成候选配置”。")
-            return
-        candidate = sync.load_candidate(path)
-        fresh = sync.is_fresh(candidate)
-        window = tk.Toplevel(self.root)
-        window.title(f"{candidate.get('agentName', candidate['agent'])} 候选预览")
-        window.geometry("820x560")
-        ttk.Label(window, text=f"目标：{candidate['targetPath']}", wraplength=780).pack(anchor="w", padx=10, pady=8)
-        ttk.Label(
-            window,
-            text="源配置未变化，可应用" if fresh else "源配置已变化，请重新生成",
-            foreground=("green" if fresh else "red"),
-        ).pack(anchor="w", padx=10)
-        box = tk.Text(window, wrap="none")
-        box.pack(fill="both", expand=True, padx=10, pady=8)
-        import json
-
-        box.insert("end", json.dumps(candidate["servers"], ensure_ascii=False, indent=2))
-        box.configure(state="disabled")
-        ttk.Button(
-            window, text="应用到此 Agent…", command=lambda: self.apply_candidate(path, window)
-        ).pack(anchor="e", padx=10, pady=(0, 10))
-
-    def apply_candidate(self, path: Path, window: tk.Toplevel | None = None) -> None:
-        candidate = sync.load_candidate(path)
-        if not sync.is_fresh(candidate):
-            messagebox.showwarning("配置已变化", "目标配置在生成候选后发生变化，请重新生成。")
-            return
-        if not messagebox.askyesno(
-            "确认应用",
-            f"将先备份，再仅替换 MCP 区块。\n\nAgent：{candidate.get('agentName', candidate['agent'])}\n"
-            f"配置：{candidate['targetPath']}\nMCP 数量：{len(candidate['servers'])}\n\n继续吗？",
-        ):
-            return
-        try:
-            backup, mode = sync.apply_candidate(path)
-        except Exception as exc:  # noqa: BLE001 - reported inline
-            messagebox.showerror("应用失败", str(exc))
-            self.log(f"应用失败：{exc}")
-            return
-        self.log(f"已应用（{mode}）；备份：{backup}")
-        messagebox.showinfo("应用完成", f"配置已写入。\n备份：{backup}")
-        if window is not None:
-            window.destroy()
-        self.refresh()
-
-    # ------------------------------------------------------------- backups
-    def backup_configs(self) -> None:
-        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        paths.BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        count = 0
-        for profile in self.profiles.values():
-            if profile.path.exists():
-                suffix = profile.path.suffix or ".json"
-                shutil.copy2(profile.path, paths.BACKUP_DIR / f"{profile.id}-{stamp}{suffix}")
-                count += 1
-        self.log(f"已备份 {count} 份配置，时间戳：{stamp}")
-        messagebox.showinfo("备份完成", f"已备份 {count} 份配置。")
-
-    def restore_backup(self) -> None:
-        file = filedialog.askopenfilename(
-            title="选择要恢复的备份", initialdir=str(paths.BACKUP_DIR), filetypes=[("配置文件", "*.json *.toml *.jsonc")]
-        )
-        if not file:
-            return
-        backup = Path(file)
-        name = backup.stem.lower()
-        matches = [
-            profile
-            for profile in self.profiles.values()
-            if name.startswith(profile.id.lower()) or profile.name.lower().replace(" ", "-") in name
-        ]
-        if len(matches) != 1:
-            messagebox.showerror("无法识别", f"备份文件名无法唯一对应到 Agent：\n{backup.name}")
-            return
-        profile = matches[0]
-        if not messagebox.askyesno("确认恢复", f"将用备份覆盖：\n{profile.path}\n\n恢复前会再备份当前文件。继续吗？"):
-            return
-        if profile.path.exists():
-            stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-            shutil.copy2(profile.path, paths.BACKUP_DIR / f"{profile.id}-before-restore-{stamp}{profile.path.suffix}")
-        profile.path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(backup, profile.path)
-        self.log(f"已恢复：{profile.path}")
-        messagebox.showinfo("恢复完成", str(profile.path))
-        self.refresh()
-
-    # ---------------------------------------------------------- diagnostics
-    def diagnose_current(self) -> None:
-        profile = self.current_profile()
-        try:
-            rows = doctor.diagnose(profile)
-        except Exception as exc:  # noqa: BLE001 - reported inline
-            messagebox.showerror("诊断失败", str(exc))
-            return
-        lines = [f"{profile.name}  {profile.path}"]
-        for row in rows:
-            state = "OK" if row["available"] else "FAIL"
-            lines.append(f"{row['name']:22} {state:5} {row['detail']}")
-            for problem in row["problems"]:
-                lines.append(f"{'':22}  ! {problem}")
-        self._show_text("诊断结果", "\n".join(lines))
-        self.log("诊断完成。")
-
-    def check_runtime(self) -> None:
-        rows = doctor.environment_report()
-        lines = [f"{row['name']:10} {'OK' if row['available'] else '--':3} {row['path']}" for row in rows]
-        lines += ["", "数据目录：" + str(paths.DATA_DIR)]
-        self._show_text("本机运行时", "\n".join(lines))
-        self.log("运行时检查完成。")
-
-    def list_agent_configs(self) -> None:
-        for profile in self.profiles.values():
+        def poll() -> None:
             try:
-                section = formats.read_section(profile.path, profile.format, profile.schema)
-                self.log(f"{profile.name}: {', '.join(section) or '无'}")
-            except Exception as exc:  # noqa: BLE001 - reported inline
-                self.log(f"{profile.name}: 解析失败：{exc}")
+                status, payload = result.get_nowait()
+            except queue.Empty:
+                self.root.after(120, poll)
+                return
+            self.progress.stop()
+            self.progress.pack_forget()
+            self.busy = False
+            self.set_status("就绪")
+            if status == "error":
+                self.log(f"任务失败：{payload}")
+                messagebox.showerror("任务失败", str(payload), parent=self.root)
+                return
+            on_done(payload)
 
-    def _show_text(self, title: str, text: str) -> None:
-        window = tk.Toplevel(self.root)
-        window.title(title)
-        window.geometry("760x420")
-        box = tk.Text(window, wrap="none")
-        box.pack(fill="both", expand=True, padx=10, pady=10)
-        box.insert("end", text)
-        box.configure(state="disabled")
+        self.root.after(120, poll)
 
-    # --------------------------------------------------------------- open
+    # ------------------------------------------------------------------- misc
+    def log(self, text: str) -> None:
+        stamp = dt.datetime.now().strftime("%H:%M:%S")
+        self.log_box.configure(state="normal")
+        self.log_box.insert("end", f"[{stamp}] {text}\n")
+        self.log_box.see("end")
+        self.log_box.configure(state="disabled")
+
+    def clear_log(self) -> None:
+        self.log_box.configure(state="normal")
+        self.log_box.delete("1.0", "end")
+        self.log_box.configure(state="disabled")
+
+    def _toggle_log(self) -> None:
+        if self.log_box.winfo_manager():
+            self.log_box.pack_forget()
+            self.log_toggle_button.configure(text="展开")
+        else:
+            self.log_box.pack(fill="x", pady=(6, 0))
+            self.log_toggle_button.configure(text="收起")
+
     def _open(self, target: Path) -> None:
+        if not Path(target).exists():
+            messagebox.showinfo("不存在", str(target), parent=self.root)
+            return
         if os.name == "nt":
             os.startfile(str(target))
         else:
             self.log(f"请手动打开：{target}")
 
-    def open_registry(self) -> None:
-        self._open(paths.REGISTRY_PATH)
-
-    def open_generated(self) -> None:
-        paths.GENERATED_DIR.mkdir(parents=True, exist_ok=True)
-        self._open(paths.GENERATED_DIR)
-
-    def open_data(self) -> None:
-        self._open(paths.DATA_DIR)
-
     def open_selected_config(self) -> None:
-        profile = self.current_profile()
+        profile = self.current()
         if not profile.path.exists():
-            messagebox.showerror("配置不存在", str(profile.path))
+            messagebox.showerror("配置不存在", str(profile.path), parent=self.root)
             return
         self._open(profile.path)
+
+    def show_shortcuts(self) -> None:
+        messagebox.showinfo(
+            "快捷键",
+            "F5            刷新\n"
+            "Ctrl+R        扫描全部 MCP\n"
+            "Ctrl+U        检查可升级包\n"
+            "Ctrl+F        聚焦搜索框\n"
+            "Ctrl+B        备份全部配置\n"
+            "Ctrl+D        诊断当前 Agent\n"
+            "Esc           清空搜索\n"
+            "双击          打开 Agent 配置\n"
+            "右键          更多操作",
+            parent=self.root,
+        )
+
+    def show_about(self) -> None:
+        messagebox.showinfo(
+            "关于 MCP Manager",
+            f"MCP Manager {__version__}\n\n"
+            "跨 Agent 的 MCP 配置管理工具。\n"
+            "Agent 差异由 mcpmanager/agents/*.toml 声明，无需改代码。\n\n"
+            f"数据目录：{paths.DATA_DIR}\n"
+            f"项目主页：{REPO_URL}",
+            parent=self.root,
+        )
+
+    def _bind_keys(self) -> None:
+        self.root.bind("<F5>", lambda _event: self.refresh_all())
+        self.root.bind("<Control-r>", lambda _event: self.scan_all())
+        self.root.bind("<Control-u>", lambda _event: self.check_updates())
+        self.root.bind("<Control-f>", lambda _event: self.search_entry.focus_set())
+        self.root.bind("<Control-b>", lambda _event: self.backup_all())
+        self.root.bind("<Control-d>", lambda _event: self.diagnose_current())
+        self.root.bind("<Escape>", lambda _event: self.search_var.set(""))
+
+    def _report_exception(self, exc_type, exc_value, exc_tb) -> None:
+        detail = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        try:
+            self.log(f"操作失败：{exc_type.__name__}: {exc_value}")
+        except Exception:
+            pass
+        messagebox.showerror("操作失败", f"{exc_type.__name__}: {exc_value}\n\n{detail.strip().splitlines()[-1]}",
+                             parent=self.root)
+
+    def _on_close(self) -> None:
+        self._save_settings()
+        self.root.destroy()
 
 
 def main() -> None:
