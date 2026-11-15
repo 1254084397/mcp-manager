@@ -76,6 +76,10 @@ python -m mcpmanager updates
 python -m mcpmanager sync --agent trae
 python -m mcpmanager sync --agent trae --apply
 
+# 从 Agent 配置中卸载某个 MCP（生成候选 → 审阅 → 应用）
+python -m mcpmanager uninstall --agent trae some-mcp
+python -m mcpmanager uninstall --agent trae some-mcp --apply
+
 # 图形界面
 python -m mcpmanager gui
 ```
@@ -99,9 +103,10 @@ mcpmanager agents
 `python -m mcpmanager gui` 打开桌面管理器：
 
 - 左侧 Agent 侧栏，绿点表示该 Agent 至少一份配置文件存在；
-- 顶部搜索、列排序、右键菜单（诊断、握手测试、改版本、更新、移除登记）；
+- 顶部搜索、列排序、右键菜单（诊断、握手测试、改版本、更新、从注册表移除、从当前 Agent 卸载）；
 - 可在“操作 → 添加 MCP…”中填写 command/URL、参数、环境变量和版本信息，登记后自动生成当前 Agent 的候选配置；
 - 添加流程只针对当前选中的 Agent，应用前可审阅候选和差异，写入时自动备份；管理器不会因此自动安装 MCP 包或浏览器等依赖；
+- 右键“从当前 Agent 卸载…”会生成只删除该 MCP 的候选配置，审阅差异后应用，写入前自动备份；注册表中的定义保留，便于之后重新安装。
 - 下方详情面板显示启动命令、参数、脱敏后的环境变量、来源文件和上次握手缓存；附加配置中的 MCP 标记为“附加配置·只读”；
 - 候选预览可以查看 JSON 和 unified diff，确认后再应用；
 - 备份管理器可列出、恢复或打开历史备份；

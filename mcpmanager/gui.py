@@ -830,6 +830,8 @@ class App:
                          state="normal" if manageable and registered else "disabled")
         menu.add_command(label="从注册表移除", command=lambda: self.remove_server(name),
                          state="normal" if registered else "disabled")
+        menu.add_command(label="从当前 Agent 卸载…", command=lambda: self.uninstall_from_agent(name),
+                         state="normal" if row.get("here") and not row.get("aux") else "disabled")
         menu.add_separator()
         menu.add_command(label="打开 Agent 配置", command=self.open_selected_config)
         menu.add_command(label="打开所在目录", command=lambda: self._open(profile.path.parent))
@@ -1026,6 +1028,20 @@ class App:
         registry.save(data)
         self.refresh_servers()
         self.log(f"已从注册表移除 {name}。")
+
+    def uninstall_from_agent(self, name: str) -> None:
+        profile = self.current()
+        if profile.readonly:
+            messagebox.showinfo("只读 Agent", f"{profile.name} 被标记为只读，不能卸载。", parent=self.root)
+            return
+        try:
+            path = sync.uninstall_candidate(profile, name)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the user
+            self.log(f"生成卸载候选失败：{exc}")
+            messagebox.showerror("无法卸载", str(exc), parent=self.root)
+            return
+        self.log(f"已生成卸载候选：{path}")
+        self.show_preview(path)
 
     # ------------------------------------------------------------- candidates
     def generate_candidate(self) -> None:

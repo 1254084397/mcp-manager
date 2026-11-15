@@ -164,6 +164,33 @@ def install_candidate(profile: Profile, registry_data: dict[str, Any], name: str
     return path
 
 
+def uninstall_candidate(profile: Profile, name: str) -> Path:
+    """Build a candidate that removes one MCP from the live config."""
+    paths.require_writable("生成卸载候选")
+    if not profile.path.exists():
+        raise FileNotFoundError(f"找不到 {profile.name} 配置：{profile.path}")
+    section = formats.read_section(profile.path, profile.format, profile.schema)
+    if name not in section:
+        raise KeyError(f"{profile.name} 配置里没有 {name}")
+    section.pop(name)
+    candidate = {
+        "agent": profile.id,
+        "agentName": profile.name,
+        "targetPath": str(profile.path),
+        "format": profile.format,
+        "schema": profile.schema,
+        "sourceSha256": hashlib.sha256(profile.path.read_bytes()).hexdigest(),
+        "generatedAt": dt.datetime.now().isoformat(timespec="seconds"),
+        "removeOnly": True,
+        "servers": section,
+    }
+    paths.GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+    safe_name = quote(name, safe="-._")
+    path = paths.GENERATED_DIR / f"{profile.id}-uninstall-{safe_name}.json"
+    path.write_text(json.dumps(candidate, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 def attach_agent_and_install(
     profile: Profile, registry_data: dict[str, Any], name: str
 ) -> tuple[Path, bool]:

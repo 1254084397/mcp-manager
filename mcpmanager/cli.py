@@ -233,6 +233,22 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_uninstall(args: argparse.Namespace) -> int:
+    profile = _profile(args.agent)
+    path = sync.uninstall_candidate(profile, args.name)
+    print(f"卸载候选已生成：{path}")
+    print(f"目标：{profile.path}")
+    if not args.apply:
+        print(f"未应用。检查差异后运行：mcpmanager apply \"{path}\"")
+        return 0
+    if not args.yes and not _confirm(f"从 {profile.name} 卸载 {args.name} 并备份当前配置？"):
+        print("已取消。")
+        return 1
+    backup, mode = sync.apply_candidate(path)
+    print(f"已卸载（{mode}）。备份：{backup}")
+    return 0
+
+
 def _confirm(prompt: str) -> bool:
     try:
         return input(prompt + " [y/N] ").strip().lower() in {"y", "yes"}
@@ -423,6 +439,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("remove", help="从主注册表移除 MCP")
     p.add_argument("name")
     p.set_defaults(func=_cmd_remove)
+
+    p = sub.add_parser("uninstall", help="从 Agent 配置中卸载 MCP")
+    p.add_argument("name")
+    p.add_argument("--agent", required=True)
+    p.add_argument("--apply", action="store_true")
+    p.add_argument("--yes", action="store_true")
+    p.set_defaults(func=_cmd_uninstall)
 
     p = sub.add_parser("catalog", help="查看内置 MCP 目录")
     p.add_argument("query", nargs="?")

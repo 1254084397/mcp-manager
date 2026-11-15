@@ -249,6 +249,28 @@ class CandidateTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             sync.attach_agent_and_install(self.profile, {"servers": {}}, "missing")
 
+    def test_uninstall_candidate_removes_server_after_apply(self):
+        path = sync.uninstall_candidate(self.profile, "playwright")
+        candidate = sync.load_candidate(path)
+        self.assertTrue(candidate["removeOnly"])
+        self.assertEqual(candidate["servers"], {})
+        backup, mode = sync.apply_candidate(path)
+        self.assertEqual(mode, "preserved")
+        self.assertTrue(backup.exists())
+        saved = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual(saved["mcpServers"], {})
+
+    def test_uninstall_candidate_keeps_other_servers(self):
+        data = json.loads(self.config.read_text(encoding="utf-8"))
+        data["mcpServers"]["other"] = {"command": "node", "args": ["x.js"]}
+        self.config.write_text(json.dumps(data) + "\n", encoding="utf-8")
+        path = sync.uninstall_candidate(self.profile, "playwright")
+        self.assertEqual(list(sync.load_candidate(path)["servers"]), ["other"])
+
+    def test_uninstall_candidate_raises_when_absent(self):
+        with self.assertRaises(KeyError):
+            sync.uninstall_candidate(self.profile, "missing")
+
 
 if __name__ == "__main__":
     unittest.main()
