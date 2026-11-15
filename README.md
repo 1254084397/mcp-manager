@@ -31,7 +31,7 @@
 - `mcpmanager/`：与 Agent 无关的内核（注册表、扫描、格式读写、版本查询、诊断、同步）。
 - `mcpmanager/agents/*.toml`：每个 Agent 的路径、格式和字段差异。
 - 每个 Agent 可以声明一份主配置和多份附加配置；读取时合并，写入只改主配置，附加配置只读。
-- 写入采用 **候选 → 审阅 → 应用**：先生成候选文件，确认后才写入，写入前自动备份。
+- 写入采用 **候选 → 审阅 → 应用**：`sync`、`uninstall` 和不带 `--apply` 的 `install` 先生成候选文件，确认后才写入；带 `--apply` 的 CLI 命令在确认后直接写入。两条路径都会在写入前自动备份。
 - JSON/JSONC 只替换顶层 MCP 区块，保留注释和无关配置；TOML 只替换 `[mcp_servers*]` 表组。
 - 个人数据（注册表、备份、候选、报告）全部在 `local/`，不会进入版本库。
 
@@ -131,8 +131,9 @@ mcpmanager agents
 | `apply 候选文件 [--yes]` | 应用指定候选（含安装候选） |
 | `add NAME --command ... [--arg ...] [--env K=V]` | 登记一个 MCP |
 | `remove NAME` | 从注册表移除（不改 Agent 配置） |
+| `uninstall NAME --agent ID [--apply] [--yes]` | 从 Agent 配置卸载；默认生成卸载候选，`--apply` 确认后备份并写入 |
 | `catalog [关键词]` | 查看内置 MCP 目录 |
-| `install NAME --agent ID [--apply]` | 从目录安装 |
+| `install NAME --agent ID [--apply] [--yes]` | 从目录安装；不带 `--apply` 时生成候选，带 `--apply` 时确认后备份并直接写入 |
 | `gui` | 打开桌面界面 |
 | `paths` | 显示数据目录 |
 
