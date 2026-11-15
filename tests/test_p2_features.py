@@ -9,7 +9,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from mcpmanager import cli, health, paths, sync
+from mcpmanager import cli, health, paths, profiles, sync
 from mcpmanager.model import Profile
 
 
@@ -110,6 +110,66 @@ class CandidateDiffEdgeTests(unittest.TestCase):
         target.write_text(json.dumps({"mcpServers": {"alpha": {"command": "node"}}}), encoding="utf-8")
         candidate = self.write_candidate(tmp, target, {"alpha": {"command": "node"}})
         self.assertEqual(sync.candidate_diff(candidate), "")
+
+
+class InstallCommandTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.config = self.tmp / "mcp.json"
+        self.profile = Profile(id="demo", name="Demo", config=str(self.config))
+        self.saved: list[dict] = []
+        self.patches = [
+            mock.patch.object(cli, "_load_catalog",
+                              lambda: {"demo-mcp": {"command": "node", "args": ["x.js"]}}),
+            mock.patch.object(cli, "_resolve_targets", lambda _agents: [self.profile]),
+            mock.patch.object(cli.registry, "load", return_value={"servers": {}}),
+            mock.patch.object(cli.registry, "save", side_effect=self.saved.append),
+            mock.patch.object(profiles, "load_profiles", lambda reload=False: {"demo": self.profile}),
+            mock.patch.object(sync.paths, "GENERATED_DIR", self.tmp / "generated"),
+            mock.patch.object(sync.paths, "BACKUP_DIR", self.tmp / "backups"),
+        ]
+        for item in self.patches:
+            item.start()
+
+    def tearDown(self) -> None:
+        for item in self.patches:
+            item.stop()
+
+    def args(self, apply: bool, yes: bool) -> argparse.Namespace:
+        return argparse.Namespace(name="demo-mcp", agent=None, apply=apply, yes=yes)
+
+    def test_apply_declined_leaves_registry_and_config_untouched(self) -> None:
+        with mock.patch.object(cli, "_confirm", return_value=False), redirect_stdout(io.StringIO()):
+            code = cli._cmd_install(self.args(apply=True, yes=False))
+        self.assertEqual(code, 0)
+        self.assertEqual(self.saved, [])
+        self.assertFalse(self.config.exists())
+
+    def test_apply_confirmed_saves_registry_and_writes_config(self) -> None:
+        with mock.patch.object(cli, "_confirm", return_value=True), redirect_stdout(io.StringIO()) as out:
+            code = cli._cmd_install(self.args(apply=True, yes=False))
+        self.assertEqual(code, 0)
+        self.assertIn("demo-mcp", self.saved[0]["servers"])
+        self.assertIn("将写入的差异", out.getvalue())
+        saved = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual(saved["mcpServers"]["demo-mcp"]["command"], "node")
+
+    def test_apply_yes_skips_prompt_and_diff(self) -> None:
+        with mock.patch.object(cli, "_confirm") as confirm, redirect_stdout(io.StringIO()) as out:
+            code = cli._cmd_install(self.args(apply=True, yes=True))
+        self.assertEqual(code, 0)
+        confirm.assert_not_called()
+        self.assertNotIn("将写入的差异", out.getvalue())
+        self.assertIn("demo-mcp", self.saved[0]["servers"])
+        self.assertTrue(self.config.exists())
+
+    def test_without_apply_registers_and_only_builds_candidate(self) -> None:
+        with redirect_stdout(io.StringIO()) as out:
+            code = cli._cmd_install(self.args(apply=False, yes=False))
+        self.assertEqual(code, 0)
+        self.assertIn("demo-mcp", self.saved[0]["servers"])
+        self.assertFalse(self.config.exists())
+        self.assertIn("候选", out.getvalue())
 
 
 if __name__ == "__main__":

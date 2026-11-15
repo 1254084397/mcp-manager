@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime as dt
 import json
 import os
@@ -330,28 +331,34 @@ def _cmd_install(args: argparse.Namespace) -> int:
     catalog = _load_catalog()
     if args.name not in catalog:
         raise SystemExit(f"目录里没有 {args.name}。运行 mcpmanager catalog 查看可用条目。")
-    data = registry.load()
+    targets = _resolve_targets(args.agent)
     spec = dict(catalog[args.name])
     spec.pop("description", None)
-    registry.add_server(data, args.name, spec)
-    registry.save(data)
-    print(f"已登记 {args.name}。")
-    targets = _resolve_targets(args.agent)
-    for profile in targets:
-        if args.apply:
-            if not args.yes and not _confirm(f"写入 {profile.name}？"):
-                continue
-            section = (
-                formats.read_section(profile.path, profile.format, profile.schema) if profile.path.exists() else {}
-            )
-            pinned = registry.patch_pins(args.name, registry.entry(data, args.name) or spec, data)
-            section[args.name] = adapters.to_agent(pinned, profile)
-            backup, mode = sync.apply_section(profile, section)
-            print(f"{profile.name}：已写入（{mode}）。备份：{backup}")
-        else:
-            path = sync.install_candidate(profile, data, args.name)
+    prepared = copy.deepcopy(registry.load())
+    registry.add_server(prepared, args.name, spec)
+
+    if not args.apply:
+        registry.save(prepared)
+        print(f"已登记 {args.name}。")
+        for profile in targets:
+            path = sync.install_candidate(profile, prepared, args.name)
             print(f"{profile.name}：候选 {path}")
             print(f"  检查后应用：mcpmanager apply \"{path}\"")
+        return 0
+
+    # --apply 保持直接写入语义，但先准备候选并展示差异；确认后才登记注册表、
+    # 备份并写入 Agent 配置。全部取消时注册表保持原样。
+    for profile in targets:
+        path = sync.install_candidate(profile, prepared, args.name)
+        if not args.yes:
+            print(f"--- {profile.name} 将写入的差异 ---")
+            print(sync.candidate_diff(path) or "（无变化）")
+            if not _confirm(f"写入 {profile.name}？"):
+                print(f"{profile.name}：已取消，Agent 配置和注册表均未修改。")
+                continue
+        registry.save(prepared)
+        backup, mode = sync.apply_candidate(path)
+        print(f"{profile.name}：已写入（{mode}）。备份：{backup}")
     return 0
 
 
@@ -451,11 +458,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("query", nargs="?")
     p.set_defaults(func=_cmd_catalog)
 
-    p = sub.add_parser("install", help="从目录安装 MCP")
+    p = sub.add_parser(
+        "install",
+        help="从目录安装 MCP：不带 --apply 时登记并生成候选，--apply 展示差异确认后备份并写入",
+    )
     p.add_argument("name")
     p.add_argument("--agent", action="append")
-    p.add_argument("--apply", action="store_true")
-    p.add_argument("--yes", action="store_true")
+    p.add_argument("--apply", action="store_true", help="确认后直接写入 Agent 配置（写入前备份）")
+    p.add_argument("--yes", action="store_true", help="跳过交互确认，配合 --apply 用于自动化")
     p.set_defaults(func=_cmd_install)
 
     sub.add_parser("gui", help="打开图形界面").set_defaults(func=_cmd_gui)

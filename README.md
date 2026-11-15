@@ -31,7 +31,8 @@
 - `mcpmanager/`：与 Agent 无关的内核（注册表、扫描、格式读写、版本查询、诊断、同步）。
 - `mcpmanager/agents/*.toml`：每个 Agent 的路径、格式和字段差异。
 - 每个 Agent 可以声明一份主配置和多份附加配置；读取时合并，写入只改主配置，附加配置只读。
-- 写入采用 **候选 → 审阅 → 应用**：`sync`、`uninstall` 和不带 `--apply` 的 `install` 先生成候选文件，确认后才写入；带 `--apply` 的 CLI 命令在确认后直接写入。两条路径都会在写入前自动备份。
+- 写入采用 **候选 → 审阅 → 应用**：`sync`、`uninstall` 和不带 `--apply` 的 `install` 先生成候选文件，确认后才写入；带 `--apply` 的 CLI 命令会先展示将写入的差异，确认后再登记注册表、备份并直接写入，取消时注册表和 Agent 配置都不变。
+- `install NAME --agent ID --apply --yes` 跳过交互确认，保持适合脚本和 CI 的直接写入语义。
 - JSON/JSONC 只替换顶层 MCP 区块，保留注释和无关配置；TOML 只替换 `[mcp_servers*]` 表组。
 - 个人数据（注册表、备份、候选、报告）全部在 `local/`，不会进入版本库。
 
