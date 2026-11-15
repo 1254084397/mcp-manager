@@ -170,9 +170,12 @@ def uninstall_candidate(profile: Profile, name: str) -> Path:
     if not profile.path.exists():
         raise FileNotFoundError(f"找不到 {profile.name} 配置：{profile.path}")
     section = formats.read_section(profile.path, profile.format, profile.schema)
-    if name not in section:
+    key = name if name in section else next(
+        (item for item in section if registry.canonical(item) == registry.canonical(name)), None
+    )
+    if key is None:
         raise KeyError(f"{profile.name} 配置里没有 {name}")
-    section.pop(name)
+    section.pop(key)
     candidate = {
         "agent": profile.id,
         "agentName": profile.name,

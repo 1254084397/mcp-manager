@@ -57,6 +57,12 @@ class AdapterTests(unittest.TestCase):
         self.assertNotIn("kind", result)
         self.assertNotIn("agents", result)
 
+    def test_update_command_is_stripped(self):
+        spec = {"command": "x", "updateCommand": ["npm", "install", "-g", "x"]}
+        result = adapters.to_agent(spec, self.profiles["trae"])
+        self.assertNotIn("updateCommand", result)
+        self.assertEqual(result["command"], "x")
+
 
 class PinTests(unittest.TestCase):
     def setUp(self):
@@ -270,6 +276,22 @@ class CandidateTests(unittest.TestCase):
     def test_uninstall_candidate_raises_when_absent(self):
         with self.assertRaises(KeyError):
             sync.uninstall_candidate(self.profile, "missing")
+
+    def test_uninstall_candidate_matches_different_case(self):
+        data = json.loads(self.config.read_text(encoding="utf-8"))
+        data["mcpServers"]["Playwright"] = data["mcpServers"].pop("playwright")
+        self.config.write_text(json.dumps(data) + "\n", encoding="utf-8")
+        path = sync.uninstall_candidate(self.profile, "playwright")
+        self.assertEqual(sync.load_candidate(path)["servers"], {})
+
+    def test_uninstall_candidate_matches_alias(self):
+        data = json.loads(self.config.read_text(encoding="utf-8"))
+        data["mcpServers"]["laya"] = {"command": "node", "args": ["laya.js"]}
+        self.config.write_text(json.dumps(data) + "\n", encoding="utf-8")
+        path = sync.uninstall_candidate(self.profile, "laya-decision")
+        candidate_servers = sync.load_candidate(path)["servers"]
+        self.assertNotIn("laya", candidate_servers)
+        self.assertIn("playwright", candidate_servers)
 
 
 if __name__ == "__main__":

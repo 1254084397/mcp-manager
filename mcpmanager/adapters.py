@@ -31,6 +31,7 @@ META_KEYS = {
     "description",
     "homepage",
     "envFromFile",
+    "updateCommand",
 }
 
 SECRET_MARKERS = ("authorization", "api_key", "apikey", "token", "secret", "password")

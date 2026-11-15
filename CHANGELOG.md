@@ -10,9 +10,15 @@
 - 新增 `mcpmanager uninstall` 命令，用于从指定 Agent 配置中卸载 MCP，支持 `--apply` 和 `--yes`。
 - `sync.uninstall_candidate()` 生成卸载候选，复用现有的候选审阅和新鲜度校验机制；注册表定义保留，便于之后重新安装。
 
+### 修复
+
+- 卸载时按 `registry.canonical()` 匹配实际配置键名，支持大小写差异和别名（如注册表 `playwright` 对应配置 `Playwright`，`laya-decision` 对应 `laya`）。
+- `adapters.META_KEYS` 补入 `updateCommand`，避免生成安装/替换候选时把更新命令写入 Agent 配置。
+
 ### 测试
 
 - 新增 3 项卸载测试：应用后条目消失、保留其他 MCP、不存在时抛错。
+- 新增大小写、别名匹配和 `updateCommand` 剥离测试。
 
 ## [1.3.1] - 2026-11-15
 
