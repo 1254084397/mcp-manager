@@ -326,9 +326,10 @@ def _headers(spec: dict[str, Any], session: str | None = None) -> dict[str, str]
         "Accept": "application/json, text/event-stream",
         "User-Agent": "mcp-manager",
     }
-    extra = spec.get("headers")
-    if isinstance(extra, dict):
-        headers.update({str(key): str(value) for key, value in extra.items()})
+    for field in ("headers", "http_headers"):
+        extra = spec.get(field)
+        if isinstance(extra, dict):
+            headers.update({str(key): str(value) for key, value in extra.items()})
     if session:
         headers["Mcp-Session-Id"] = session
     return headers

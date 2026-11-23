@@ -17,6 +17,7 @@ class ProfileTests(unittest.TestCase):
             self.assertIn(agent, data)
         self.assertEqual(data["opencode"].command, "array")
         self.assertEqual(data["opencode"].env, "environment")
+        self.assertEqual(data["opencode"].schema, "mcp.servers")
         self.assertEqual(data["vscode"].schema, "servers")
         self.assertEqual(data["codex"].format, "toml")
         self.assertTrue(data["trae"].path.is_absolute())
@@ -115,6 +116,30 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(mode, "preserved")
         self.assertIn("// keep me", text)
         self.assertEqual(json.loads(formats.strip_jsonc(text))["mcp"], {"new": {"command": "y"}})
+
+    def test_nested_jsonc_block_preserves_mcp_siblings(self):
+        path = self.tmp / "opencode-v2.jsonc"
+        path.write_text(
+            '{\n  // keep me\n  "mcp": {\n    "servers": {"old": {"command": "x"}},\n'
+            '    "codemode": true\n  }\n}\n',
+            encoding="utf-8",
+        )
+        mode = formats.write_section(path, "jsonc", "mcp.servers", {"new": {"command": "y"}})
+        text = path.read_text(encoding="utf-8")
+        self.assertEqual(mode, "preserved")
+        self.assertIn("// keep me", text)
+        data = json.loads(formats.strip_jsonc(text))
+        self.assertEqual(data["mcp"]["servers"], {"new": {"command": "y"}})
+        self.assertTrue(data["mcp"]["codemode"])
+
+    def test_nested_jsonc_missing_key_appends_to_parent(self):
+        path = self.tmp / "opencode-v2-empty.jsonc"
+        path.write_text('{\n  "mcp": {\n    "codemode": true\n  }\n}\n', encoding="utf-8")
+        mode = formats.write_section(path, "jsonc", "mcp.servers", {"new": {"command": "y"}})
+        self.assertEqual(mode, "appended")
+        data = json.loads(formats.strip_jsonc(path.read_text(encoding="utf-8")))
+        self.assertEqual(data["mcp"]["servers"], {"new": {"command": "y"}})
+        self.assertTrue(data["mcp"]["codemode"])
 
     def test_json_missing_key_appends_without_dropping_comments(self):
         path = self.tmp / "config.jsonc"

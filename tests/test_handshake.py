@@ -149,6 +149,14 @@ class HttpHandshakeTests(unittest.TestCase):
         self.assertEqual(result["tools"], ["ping", "echo"])
         self.assertEqual(result["serverInfo"]["name"], "fake-http")
 
+    def test_codex_http_headers_are_included(self) -> None:
+        headers = handshake._headers({
+            "headers": {"X-Client": "mcp-manager"},
+            "http_headers": {"Authorization": "Bearer test"},
+        })
+        self.assertEqual(headers["X-Client"], "mcp-manager")
+        self.assertEqual(headers["Authorization"], "Bearer test")
+
     def test_http_sse_response(self) -> None:
         result = self.probe("sse")
         self.assertTrue(result["ok"], result)

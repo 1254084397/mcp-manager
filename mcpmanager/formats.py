@@ -82,10 +82,14 @@ def load_config(path: Path, fmt: str) -> dict[str, Any]:
 
 def read_section(path: Path, fmt: str, schema: str) -> dict[str, Any]:
     data = load_config(path, fmt)
-    section = data.get(schema)
-    if not isinstance(section, dict):
+    section: Any = data
+    for key in schema.split("."):
+        if not isinstance(section, dict):
+            raise ConfigError(f"{path} 的 {schema} 不是对象")
+        section = section.get(key)
         if section is None:
             return {}
+    if not isinstance(section, dict):
         raise ConfigError(f"{path} 的 {schema} 不是对象")
     return section
 
@@ -184,8 +188,24 @@ def _top_level_value_span(text: str, key: str) -> tuple[int, int] | None:
     return None
 
 
+def _path_value_span(text: str, schema: str) -> tuple[int, int] | None:
+    base = 0
+    scope = text
+    parts = schema.split(".")
+    for index, key in enumerate(parts):
+        span = _top_level_value_span(scope, key)
+        if span is None:
+            return None
+        start, end = span
+        if index == len(parts) - 1:
+            return base + start, base + end
+        scope = scope[start : end + 1]
+        base += start
+    return None
+
+
 def _render_json_block(text: str, key: str, servers: dict[str, Any]) -> str | None:
-    span = _top_level_value_span(text, key)
+    span = _path_value_span(text, key)
     if span is None:
         return None
     start, end = span
@@ -198,10 +218,18 @@ def _render_json_block(text: str, key: str, servers: dict[str, Any]) -> str | No
 
 
 def _append_json_key(text: str, key: str, servers: dict[str, Any]) -> str | None:
-    """Insert a missing top-level key before the closing brace, keeping comments."""
-    index = len(text) - 1
-    while index >= 0 and text[index] in " \t\r\n":
-        index -= 1
+    """Insert a missing key before its parent object's closing brace."""
+    parts = key.split(".")
+    if len(parts) == 1:
+        index = len(text) - 1
+        while index >= 0 and text[index] in " \t\r\n":
+            index -= 1
+    else:
+        parent = _path_value_span(text, ".".join(parts[:-1]))
+        if parent is None:
+            return None
+        index = parent[1]
+        key = parts[-1]
     if index < 0 or text[index] != "}":
         return None
     line_start = text.rfind("\n", 0, index) + 1
@@ -329,7 +357,17 @@ def write_section(path: Path, fmt: str, schema: str, servers: dict[str, Any]) ->
             mode = "appended"
         if candidate is None:
             data = parse_json(original, jsonc=(fmt == "jsonc")) if original.strip() else {}
-            data[schema] = servers
+            target = data
+            parts = schema.split(".")
+            for key in parts[:-1]:
+                child = target.get(key)
+                if child is None:
+                    child = {}
+                    target[key] = child
+                if not isinstance(child, dict):
+                    raise ConfigError(f"{path} 的 {key} 不是对象")
+                target = child
+            target[parts[-1]] = servers
             candidate = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
             mode = "rewritten"
     else:
@@ -339,7 +377,12 @@ def write_section(path: Path, fmt: str, schema: str, servers: dict[str, Any]) ->
         check = tomllib.loads(candidate) if fmt == "toml" else parse_json(candidate, jsonc=(fmt == "jsonc"))
     except Exception as exc:
         raise ConfigError(f"写回后配置无法解析，已中止：{exc}") from exc
-    if check.get(schema) != servers:
+    check_section: Any = check
+    for key in schema.split("."):
+        if not isinstance(check_section, dict):
+            raise ConfigError("写回校验失败：MCP 区块内容与候选不一致，已中止")
+        check_section = check_section.get(key)
+    if check_section != servers:
         raise ConfigError("写回校验失败：MCP 区块内容与候选不一致，已中止")
 
     path.write_text(candidate, encoding="utf-8")
