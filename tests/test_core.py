@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from mcpmanager import adapters, formats, profiles, registry, sync
+from mcpmanager import adapters, formats, paths, profiles, registry, sync
 from mcpmanager.model import Profile
 
 
@@ -21,6 +21,10 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(data["vscode"].schema, "servers")
         self.assertEqual(data["codex"].format, "toml")
         self.assertTrue(data["trae"].path.is_absolute())
+
+    def test_codex_profile_follows_codex_home(self):
+        data = profiles.load_profiles(reload=True)
+        self.assertEqual(data["codex"].path, paths.CODEX_HOME / "config.toml")
 
     def test_alias_resolution(self):
         data = profiles.load_profiles(reload=True)

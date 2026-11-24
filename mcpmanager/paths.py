@@ -19,6 +19,11 @@ APP_NAME = "mcp-manager"
 HOME = Path(os.environ.get("USERPROFILE") or Path.home())
 APPDATA = Path(os.environ.get("APPDATA") or HOME / "AppData" / "Roaming")
 LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA") or HOME / "AppData" / "Local")
+def codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or HOME / ".codex").expanduser()
+
+
+CODEX_HOME = codex_home()
 
 
 def _project_root() -> Path:
@@ -60,6 +65,7 @@ PLACEHOLDERS = {
     "home": HOME,
     "appdata": APPDATA,
     "localappdata": LOCALAPPDATA,
+    "codex_home": CODEX_HOME,
     "project": PROJECT_ROOT,
     "data": DATA_DIR,
 }
@@ -80,11 +86,12 @@ def require_writable(action: str) -> None:
 
 
 def expand_path(template: str) -> Path:
-    """Resolve ``{home}``/``{appdata}`` placeholders in a profile path."""
+    """Resolve ``{home}``/``{appdata}``/``{codex_home}`` placeholders in a profile path."""
+    dynamic = {**PLACEHOLDERS, "codex_home": codex_home()}
 
     def replace(match: re.Match[str]) -> str:
         key = match.group(1)
-        value = PLACEHOLDERS.get(key)
+        value = dynamic.get(key)
         return str(value) if value is not None else match.group(0)
 
     return Path(re.sub(r"\{(\w+)\}", replace, template)).expanduser()

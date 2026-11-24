@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import re
 import tomllib
 from pathlib import Path
 
-from . import paths
+from . import adapters, formats, paths
 from .model import Profile
 
 _CACHE: dict[str, Profile] | None = None
@@ -87,3 +88,213 @@ def resolve_profile(profiles: dict[str, Profile], key: str) -> Profile:
 
 def writable_profiles(profiles: dict[str, Profile]) -> list[Profile]:
     return [profile for profile in profiles.values() if not profile.readonly]
+
+
+def detected_profiles(profiles: dict[str, Profile]) -> dict[str, Profile]:
+    """Return profiles with at least one real configuration file on this host.
+
+    A bundled profile describes a possible Agent; it is not evidence that the
+    Agent is installed.  The GUI should only present profiles whose primary or
+    auxiliary configuration exists, while CLI commands may still resolve every
+    bundled profile explicitly.
+    """
+    return {
+        profile_id: profile
+        for profile_id, profile in profiles.items()
+        if any(path.is_file() for path in profile.paths)
+    }
+
+
+def profile_source_kind(profile: Profile) -> str:
+    """Return ``override`` for ``local/agents/*.toml`` or ``bundled`` otherwise."""
+    if not profile.source:
+        return "bundled"
+    try:
+        if Path(profile.source).resolve().parent == paths.USER_PROFILE_DIR.resolve():
+            return "override"
+    except OSError:
+        pass
+    return "bundled"
+
+
+def _is_redirected(path: Path) -> tuple[bool, Path]:
+    """Return ``(redirected, resolved_path)`` for symlinks or Windows junctions."""
+    abs_path = Path(os.path.abspath(str(path)))
+    real_path = Path(os.path.realpath(str(path)))
+    has_link = any(
+        candidate.is_symlink() or (hasattr(candidate, "is_junction") and candidate.is_junction())
+        for candidate in (abs_path, *abs_path.parents)
+    )
+    if not has_link:
+        return False, real_path
+    return os.path.normcase(str(abs_path)) != os.path.normcase(str(real_path)), real_path
+
+
+def _recognition_tokens(profile: Profile, source_kind: str) -> list[str]:
+    tokens = ["local_override" if source_kind == "override" else "bundled_profile"]
+    if "{codex_home}" in profile.config:
+        tokens.append("CODEX_HOME" if os.environ.get("CODEX_HOME") else "default_codex_home")
+    elif "{appdata}" in profile.config:
+        tokens.append("APPDATA")
+    elif "{localappdata}" in profile.config:
+        tokens.append("LOCALAPPDATA")
+    elif "{home}" in profile.config:
+        tokens.append("HOME")
+    else:
+        tokens.append("explicit_path")
+    if profile.path.is_file():
+        tokens.append("config_file")
+    elif any(extra.is_file() for extra in profile.paths[1:]):
+        tokens.append("auxiliary_config_file")
+    return tokens
+
+
+def detect_agent(profile: Profile) -> dict[str, object]:
+    """Return structured detection & config status for one Agent profile."""
+    info = describe_profile_paths(profile)
+    primary = profile.path
+    redirected, resolved = _is_redirected(primary)
+    existing_paths = [candidate for candidate in profile.paths if candidate.is_file()]
+    configured = bool(existing_paths)
+    config_state = "missing"
+    config_error: str | None = None
+    mcp_count: int | None = 0
+    host_count = 0
+    source_counts: dict[str, int] = {}
+    server_names: list[str] = []
+    server_sources: dict[str, str] = {}
+    path_duplicates: list[dict[str, object]] = []
+
+    if configured:
+        try:
+            section, sources = formats.read_merged_section(profile.paths, profile.format, profile.schema)
+            real_entries = {
+                name: spec
+                for name, spec in section.items()
+                if isinstance(spec, dict) and not adapters.is_container(spec)
+            }
+            server_names = list(real_entries)
+            mcp_count = len(real_entries)
+            server_sources = {name: str(sources[name]) for name in server_names if name in sources}
+            per_server_files: dict[str, list[Path]] = {}
+            for candidate_path in existing_paths:
+                try:
+                    part = formats.read_section(candidate_path, profile.format, profile.schema)
+                except Exception:
+                    continue
+                for srv_name, srv_spec in part.items():
+                    if isinstance(srv_spec, dict) and not adapters.is_container(srv_spec):
+                        per_server_files.setdefault(srv_name, []).append(candidate_path)
+            for srv_name, file_list in per_server_files.items():
+                if len(file_list) > 1 and srv_name in sources:
+                    winner = sources[srv_name]
+                    shadowed = [str(p) for p in file_list if p != winner]
+                    if shadowed:
+                        path_duplicates.append({
+                            "name": srv_name,
+                            "effectiveSource": str(winner),
+                            "shadowedSources": shadowed,
+                        })
+            for spec in real_entries.values():
+                if adapters.level_of(spec, profile) == "host":
+                    host_count += 1
+                category = adapters.source_category(spec, profile)
+                source_counts[category] = source_counts.get(category, 0) + 1
+            if mcp_count > 0 and host_count == mcp_count:
+                config_state = "plugin_only"
+            else:
+                config_state = "ok"
+        except PermissionError as exc:
+            mcp_count = None
+            config_state = "permission_error"
+            config_error = f"无读取权限：{exc}"
+        except (formats.ConfigError, ValueError) as exc:
+            mcp_count = None
+            config_state = "parse_error"
+            config_error = f"配置格式错误：{exc}"
+        except OSError as exc:
+            mcp_count = None
+            config_state = "read_error"
+            config_error = f"读取失败：{exc}"
+
+    detected = configured
+    evidence = []
+    for candidate in info["candidates"]:
+        c_path = Path(str(candidate["path"]))
+        c_redir, c_real = _is_redirected(c_path)
+        evidence.append({
+            "path": str(c_path),
+            "kind": "effective" if candidate["role"] == "primary" else "auxiliary",
+            "exists": bool(candidate["exists"]),
+            "redirected": c_redir,
+            "resolvedPath": str(c_real),
+        })
+
+    return {
+        "agent": profile.id,
+        "name": profile.name,
+        "detected": detected,
+        "configured": configured,
+        "configState": config_state,
+        "configError": config_error,
+        "displayPath": str(primary),
+        "resolvedPath": str(resolved),
+        "redirected": redirected,
+        "sourceKind": info["sourceKind"],
+        "recognitionBasis": info["recognitionBasis"],
+        "recognitionTokens": _recognition_tokens(profile, str(info["sourceKind"])),
+        "evidence": evidence,
+        "hasMultipleSources": bool(info["hasMultipleExisting"]),
+        "priority": info["priority"],
+        "priorityNote": info["priorityNote"],
+        "mcpCount": mcp_count,
+        "hostMcpCount": host_count,
+        "sourceCounts": source_counts,
+        "serverNames": server_names,
+        "serverSources": server_sources,
+        "pathDuplicates": path_duplicates,
+    }
+
+
+def describe_profile_paths(profile: Profile) -> dict[str, object]:
+    """Summarize primary/auxiliary config paths and how they were resolved."""
+    source_kind = profile_source_kind(profile)
+    basis_parts = ["本机覆盖 (local/agents)" if source_kind == "override" else "内置 profile"]
+    if "{codex_home}" in profile.config:
+        if os.environ.get("CODEX_HOME"):
+            basis_parts.append("CODEX_HOME 环境变量")
+        else:
+            basis_parts.append("默认 ~/.codex")
+    elif "{appdata}" in profile.config:
+        basis_parts.append("APPDATA 目录")
+    elif "{localappdata}" in profile.config:
+        basis_parts.append("LOCALAPPDATA 目录")
+    elif "{home}" in profile.config:
+        basis_parts.append("用户主目录")
+    else:
+        basis_parts.append("显式路径")
+
+    candidates = []
+    for index, candidate in enumerate(profile.paths):
+        candidates.append({
+            "path": str(candidate),
+            "role": "primary" if index == 0 else "auxiliary",
+            "exists": candidate.exists(),
+            "readonly": index > 0 or profile.readonly,
+            "optional": False if index == 0 else profile.auxiliary_optional,
+        })
+    existing_count = sum(1 for item in candidates if item["exists"])
+    priority_note = (
+        f"检测到 {existing_count} 个候选配置；当前按 {profile.config_priority} 合并，实际加载优先级以 {profile.name} 本身为准。"
+        if existing_count > 1
+        else ""
+    )
+    return {
+        "sourceKind": source_kind,
+        "sourceFile": profile.source,
+        "recognitionBasis": " + ".join(basis_parts),
+        "candidates": candidates,
+        "hasMultipleExisting": existing_count > 1,
+        "priority": profile.config_priority,
+        "priorityNote": priority_note,
+    }

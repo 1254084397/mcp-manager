@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (adapters, discovery, doctor, formats, handshake, health, paths,
-               profiles as profiles_mod, registry, sync, versioning)
+               profiles as profiles_mod, provenance, registry, sync, versioning)
 
 
 def _profiles():
@@ -32,16 +32,20 @@ def _resolve_targets(values: list[str] | None) -> list:
 
 
 def _print_agents() -> None:
-    print(f"{'ID':18} {'名称':20} {'状态':6} 配置")
+    print(f"{'ID':18} {'名称':20} {'状态':6} {'来源':8} 配置")
     for profile in _profiles().values():
+        info = profiles_mod.describe_profile_paths(profile)
         state = "OK" if any(path.exists() for path in profile.paths) else "--"
-        print(f"{profile.id:18} {profile.name:20} {state:6} {profile.path}")
+        kind_label = "本机覆盖" if info["sourceKind"] == "override" else "内置"
+        print(f"{profile.id:18} {profile.name:20} {state:6} {kind_label:8} {profile.path}  ({info['recognitionBasis']})")
         for extra in profile.paths[1:]:
             if extra.exists():
                 mark = "只读，存在"
             else:
                 mark = "只读，可选，未发现" if profile.auxiliary_optional else "只读，必选，缺失"
-            print(f"{'':18} {'':20} {'附加':6} {extra}（{mark}）")
+            print(f"{'':18} {'':20} {'附加':6} {'':8} {extra}（{mark}）")
+        if info["priorityNote"]:
+            print(f"{'':18} {'':20} {'提示':6} {'':8} {info['priorityNote']}")
 
 
 def _print_list(agent: str) -> None:
@@ -193,6 +197,166 @@ def _cmd_health(args: argparse.Namespace) -> int:
     return 0
 
 
+def collect_status() -> dict[str, Any]:
+    """Collect status summary for all configured Agent profiles without mutating anything."""
+    rows = []
+    discovered_configs = []
+    all_conflicts = []
+    cached = health.load()
+    reg_data = registry.load()
+    managed_all = provenance.load_managed()
+
+    for profile in _profiles().values():
+        det = profiles_mod.detect_agent(profile)
+        config_state = str(det["configState"])
+        count = det["mcpCount"]
+        server_names = list(det["serverNames"])
+        agent_conflicts: list[dict[str, str]] = []
+
+        if config_state in {"ok", "plugin_only"}:
+            try:
+                section, _sources = formats.read_merged_section(
+                    profile.paths, profile.format, profile.schema
+                )
+                managed_map = managed_all.get(profile.id, {})
+                for srv_name, spec in section.items():
+                    if not isinstance(spec, dict) or adapters.is_container(spec):
+                        continue
+                    managed_entry = managed_map.get(srv_name) if isinstance(managed_map, dict) else None
+                    reason = sync._detect_conflict(srv_name, spec, profile, reg_data, managed_entry)
+                    if reason:
+                        conflict_item = {"agent": profile.id, "name": srv_name, "reason": reason}
+                        agent_conflicts.append(conflict_item)
+                        all_conflicts.append(conflict_item)
+            except Exception:
+                pass
+        for dup in det.get("pathDuplicates", []):
+            shadowed = "，".join(dup["shadowedSources"])
+            conflict_item = {
+                "agent": profile.id,
+                "name": dup["name"],
+                "reason": f"多配置文件存在同名 MCP：实际采用 {dup['effectiveSource']}，被隐藏来源：{shadowed}",
+            }
+            agent_conflicts.append(conflict_item)
+            all_conflicts.append(conflict_item)
+
+        for ev in det["evidence"]:
+            if ev["exists"]:
+                discovered_configs.append({
+                    "agent": profile.id,
+                    "path": ev["path"],
+                    "kind": ev["kind"],
+                    "redirected": ev["redirected"],
+                    "resolvedPath": ev["resolvedPath"],
+                })
+
+        checks = cached.get(profile.id, {})
+        if not isinstance(checks, dict):
+            checks = {}
+        if config_state in {"ok", "plugin_only"}:
+            ok = sum(1 for name in server_names if isinstance(checks.get(name), dict) and checks[name].get("ok") is True)
+            failed = sum(1 for name in server_names if isinstance(checks.get(name), dict) and checks[name].get("ok") is False)
+            checked = ok + failed
+            unchecked = max(0, (int(count) if count is not None else 0) - checked)
+        else:
+            ok = sum(1 for item in checks.values() if isinstance(item, dict) and item.get("ok") is True)
+            failed = sum(1 for item in checks.values() if isinstance(item, dict) and item.get("ok") is False)
+            checked = ok + failed
+            unchecked = 0
+        timestamps = [
+            str(item.get("checkedAt"))
+            for item in checks.values()
+            if isinstance(item, dict) and item.get("checkedAt")
+        ]
+        last_checked_at = max(timestamps) if timestamps else None
+
+        rows.append({
+            "agent": profile.id,
+            "name": profile.name,
+            "detected": bool(det["detected"]),
+            "configured": bool(det["configured"]),
+            "configFileExists": bool(det["configured"]),
+            "agentLoaded": None,
+            "configState": config_state,
+            "configError": det["configError"],
+            "path": det["displayPath"],
+            "displayPath": det["displayPath"],
+            "resolvedPath": det["resolvedPath"],
+            "redirected": bool(det["redirected"]),
+            "sourceKind": det["sourceKind"],
+            "recognitionBasis": det["recognitionBasis"],
+            "recognitionTokens": det["recognitionTokens"],
+            "evidence": det["evidence"],
+            "candidatePaths": det["evidence"],
+            "hasMultipleSources": bool(det["hasMultipleSources"]),
+            "priority": det["priority"],
+            "priorityNote": det["priorityNote"],
+            "mcpCount": count,
+            "hostMcpCount": det["hostMcpCount"],
+            "sourceCounts": det["sourceCounts"],
+            "serverSources": det["serverSources"],
+            "pathDuplicates": det["pathDuplicates"],
+            "conflicts": agent_conflicts,
+            "lastHealth": {
+                "ok": ok,
+                "failed": failed,
+                "unchecked": unchecked,
+                "checked": checked,
+                "lastCheckedAt": last_checked_at,
+                "advisoryOnly": True,
+            },
+        })
+    return {
+        "schemaVersion": 2,
+        "generatedAt": dt.datetime.now().isoformat(timespec="seconds"),
+        "note": "configured/configFileExists 仅表示配置文件存在，不代表 Agent 当前已加载；lastHealth 来自最近一次本地握手缓存。",
+        "notes": [
+            "configured/configFileExists 仅表示配置文件存在，不代表 Agent 当前已加载。",
+            "lastHealth 来自最近一次本地握手缓存 (local/health.json)，不代表当前运行态。",
+        ],
+        "agents": rows,
+        "discoveredConfigs": discovered_configs,
+        "conflicts": all_conflicts,
+    }
+
+
+def _cmd_status(args: argparse.Namespace) -> int:
+    """Summarize live Agent config locations and last known MCP health."""
+    report = collect_status()
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+    state_labels = {
+        "ok": "存在",
+        "plugin_only": "仅插件",
+        "missing": "未发现",
+        "parse_error": "格式错误",
+        "permission_error": "权限错误",
+        "read_error": "读取错误",
+    }
+    print(f"{'AGENT':16} {'检测':6} {'配置状态':8} {'MCP':>4} {'来源数':>6} {'最近握手(成/败/未)':18} {'最后检查':19} 有效路径")
+    for row in report["agents"]:
+        det_label = "是" if row["detected"] else "否"
+        state = state_labels.get(row["configState"], row["configState"])
+        count_text = "-" if row["mcpCount"] is None else str(row["mcpCount"])
+        src_count = len(row.get("sourceCounts") or {})
+        h = row["lastHealth"]
+        health_text = f"{h['ok']}/{h['failed']}/{h['unchecked']}"
+        last_time = h["lastCheckedAt"] or "-"
+        print(f"{row['agent']:16} {det_label:6} {state:8} {count_text:>4} {src_count:>6} {health_text:18} {last_time:19} {row['displayPath']}")
+        if row["redirected"]:
+            print(f"  [重定向] 显示路径：{row['displayPath']} | 实际路径：{row['resolvedPath']} | 是否重定向：是")
+        if row["configError"]:
+            print(f"  [错误] {row['configError']}")
+        if row["priorityNote"]:
+            print(f"  [多路径] {row['priorityNote']}")
+        for conflict in row.get("conflicts", []):
+            print(f"  [冲突] {conflict['name']}：{conflict['reason']}")
+    print()
+    print("说明：'存在' 仅表示配置文件在磁盘上存在，不代表 Agent 当前已加载；最近握手来自本地探测缓存。")
+    return 0
+
+
 def _cmd_updates(_args: argparse.Namespace) -> int:
     data = registry.load()
     targets = [(name, spec) for name, spec in registry.servers(data).items() if spec.get("package")]
@@ -221,8 +385,25 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     profile = _profile(args.agent)
     data = registry.load()
     candidate = sync.build_candidate(profile, data)
+    summary = sync.summarize_candidate(candidate.path)
+    diff = sync.candidate_diff(candidate.path)
     print(f"候选已生成：{candidate.path}")
     print(f"目标：{candidate.target}（{len(candidate.servers)} 个 MCP）")
+    print(
+        "变更计划："
+        f"新增 {len(summary['added'])}（{', '.join(summary['added']) or '无'}），"
+        f"更新 {len(summary['updated'])}（{', '.join(summary['updated']) or '无'}），"
+        f"保留 {len(summary['kept'])}，"
+        f"跳过 {len(summary['skipped'])}，"
+        f"冲突 {len(summary.get('conflicts', []))}"
+    )
+    for item in summary.get("conflicts", []):
+        print(f"  [冲突] {item['name']}：{item['reason']}")
+    for item in summary["skipped"]:
+        print(f"  [跳过] {item['name']}：{item['reason']}")
+    if diff:
+        print("--- 差异预览（凭据已脱敏） ---")
+        print(diff)
     if not args.apply:
         print("未应用。检查候选后运行：mcpmanager sync --agent ... --apply")
         return 0
@@ -375,6 +556,33 @@ def _cmd_paths(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_audit(args: argparse.Namespace) -> int:
+    agent = _profile(args.agent).id if args.agent else None
+    entries = provenance.load_audit(agent=agent, limit=args.limit)
+    if args.json:
+        print(json.dumps({"entries": entries}, ensure_ascii=False, indent=2))
+        return 0
+    if not entries:
+        print("暂无同步审计记录。")
+        return 0
+    print(f"{'时间':19} {'AGENT':14} {'模式':10} {'结果':6} {'新增/更/删/跳/冲突':16} 备份")
+    for item in entries:
+        s = item.get("summary") or {}
+        counts = (
+            f"{len(s.get('added', []))}/{len(s.get('updated', []))}/"
+            f"{len(s.get('removed', []))}/{len(s.get('skipped', []))}/"
+            f"{len(s.get('conflicts', []))}"
+        )
+        print(
+            f"{str(item.get('timestamp', '-')):19} "
+            f"{str(item.get('agent', '-')):14} "
+            f"{str(item.get('mode', '-')):10} "
+            f"{str(item.get('result', '-')):6} "
+            f"{counts:16} {item.get('backupPath') or '-'}"
+        )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     from . import __version__
 
@@ -416,6 +624,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--agent")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=_cmd_health)
+
+    p = sub.add_parser("status", help="汇总 Agent 的有效配置路径、MCP 数量和最近健康状态")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=_cmd_status)
 
     p = sub.add_parser("updates", help="检查可升级的包")
     p.set_defaults(func=_cmd_updates)
@@ -467,6 +679,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--apply", action="store_true", help="确认后直接写入 Agent 配置（写入前备份）")
     p.add_argument("--yes", action="store_true", help="跳过交互确认，配合 --apply 用于自动化")
     p.set_defaults(func=_cmd_install)
+
+    p = sub.add_parser("audit", help="查看同步审计记录")
+    p.add_argument("--agent")
+    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=_cmd_audit)
 
     sub.add_parser("gui", help="打开图形界面").set_defaults(func=_cmd_gui)
     return parser

@@ -1,6 +1,6 @@
 id = "codex"
 name = "Codex CLI"
-config = "{home}/.codex/config.toml"
+config = "{codex_home}/config.toml"
 format = "toml"
 schema = "mcp_servers"
 aliases = ["codex-cli"]

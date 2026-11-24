@@ -19,7 +19,7 @@ import traceback
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from . import __version__, adapters, creation, discovery, doctor, formats, handshake, health, paths, profiles, registry, sync, versioning
+from . import __version__, adapters, creation, discovery, doctor, formats, handshake, health, paths, profiles, provenance, registry, sync, versioning
 
 FONT = "Microsoft YaHei UI"
 MONO = "Consolas"
@@ -96,8 +96,9 @@ class App:
 
         self.settings = self._load_settings()
         self.dark = bool(self.settings.get("dark"))
-        self.agent_id = self.settings.get("agent") if self.settings.get("agent") in self.profiles else (
-            "trae" if "trae" in self.profiles else next(iter(self.profiles))
+        self.detected = profiles.detected_profiles(self.profiles)
+        self.agent_id = self.settings.get("agent") if self.settings.get("agent") in self.detected else (
+            "trae" if "trae" in self.detected else next(iter(self.detected), None)
         )
         self.sort_column = "MCP"
         self.sort_reverse = False
@@ -106,6 +107,7 @@ class App:
         self._themed: list = []
         self._buttons: list[tuple[tk.Button, str]] = []
         self._sidebar_rows: dict[str, dict] = {}
+        self._agent_meta: dict[str, dict] = {}
 
         self._enable_dpi()
         self.root = tk.Tk()
@@ -190,7 +192,9 @@ class App:
 
     def _theme(self, widget, bg: str | None = None, fg: str | None = None,
                active_bg: str | None = None, insert: str | None = None) -> None:
-        def apply() -> None:
+        def apply() -> bool:
+            if not widget.winfo_exists():
+                return False
             colors = self.palette()
             options = {}
             if bg:
@@ -203,6 +207,7 @@ class App:
                 options["insertbackground"] = colors[insert]
             if options:
                 widget.configure(**options)
+            return True
 
         self._themed.append(apply)
         apply()
@@ -377,11 +382,11 @@ class App:
         self.paned.add(tree_card, weight=4)
         self._theme(tree_card, bg="surface")
 
-        columns = ("MCP", "类型", "版本", "状态")
+        columns = ("MCP", "来源", "类型", "版本", "状态")
         self.tree = ttk.Treeview(
             tree_card, columns=columns, show="headings", selectmode="browse", style="App.Treeview", height=9
         )
-        for column, width in zip(columns, (240, 170, 120, 260)):
+        for column, width in zip(columns, (200, 125, 140, 100, 240)):
             self.tree.heading(column, text=column, anchor="w", command=lambda c=column: self.sort_by(c))
             self.tree.column(column, width=width, anchor="w", stretch=(column == "状态"))
         scroll = ttk.Scrollbar(tree_card, orient="vertical", command=self.tree.yview, style="App.Vertical.TScrollbar")
@@ -424,15 +429,47 @@ class App:
         heading.pack(fill="x", padx=18, pady=(16, 8))
         self._theme(heading, bg="sidebar", fg="muted")
 
-        for profile in self.profiles.values():
+        if not self.detected:
+            empty = tk.Label(
+                self.sidebar,
+                text="未检测到已安装的 Agent\n\n仅显示本机存在有效配置的 Agent。",
+                font=(FONT, 9),
+                justify="left",
+                anchor="w",
+                wraplength=200,
+            )
+            empty.pack(fill="x", padx=18, pady=12)
+            self._theme(empty, bg="sidebar", fg="muted")
+
+        cached_health = health.load()
+        for profile in self.detected.values():
+            det = profiles.detect_agent(profile)
+            self._agent_meta[profile.id] = det
             row = tk.Frame(self.sidebar, cursor="hand2")
-            row.pack(fill="x", padx=10, pady=1)
+            row.pack(fill="x", padx=10, pady=2)
             dot = tk.Label(row, text="●", font=(FONT, 9), width=2)
-            dot.pack(side="left", padx=(6, 0))
-            name = tk.Label(row, text=profile.name, font=(FONT, 9), anchor="w")
-            name.pack(side="left", fill="x", expand=True, pady=6)
-            self._sidebar_rows[profile.id] = {"row": row, "dot": dot, "name": name}
-            for widget in (row, dot, name):
+            dot.pack(side="left", padx=(6, 0), anchor="n", pady=5)
+            text_col = tk.Frame(row)
+            text_col.pack(side="left", fill="x", expand=True, pady=4)
+            name = tk.Label(text_col, text=profile.name, font=(FONT, 9), anchor="w")
+            name.pack(fill="x")
+            checks = cached_health.get(profile.id, {})
+            ok = sum(1 for item in checks.values() if isinstance(item, dict) and item.get("ok") is True)
+            fail = sum(1 for item in checks.values() if isinstance(item, dict) and item.get("ok") is False)
+            count_text = "-" if det["mcpCount"] is None else str(det["mcpCount"])
+            sub_parts = [f"{count_text} MCP", f"{ok}✓/{fail}✗"]
+            if det["hasMultipleSources"]:
+                sub_parts.append("多来源")
+            if det["configState"] == "parse_error":
+                sub_parts.append("解析失败")
+            elif det["configState"] in {"permission_error", "read_error"}:
+                sub_parts.append("读取错误")
+            elif det["configState"] == "plugin_only":
+                sub_parts.append("仅插件")
+            sub = tk.Label(text_col, text=" · ".join(sub_parts), font=(FONT, 8), anchor="w")
+            sub.pack(fill="x")
+            self._sidebar_rows[profile.id] = {"row": row, "dot": dot, "col": text_col, "name": name, "sub": sub}
+            for widget in (row, dot, text_col, name, sub):
                 widget.bind("<Button-1>", lambda _event, pid=profile.id: self.select_agent(pid))
             row.bind("<Enter>", lambda _event, pid=profile.id: self._hover_agent(pid, True))
             row.bind("<Leave>", lambda _event, pid=profile.id: self._hover_agent(pid, False))
@@ -466,12 +503,12 @@ class App:
         self._theme(self.log_box, bg="surface2", fg="muted")
 
     def _hover_agent(self, profile_id: str, active: bool) -> None:
-        if profile_id == self.agent_id:
+        if profile_id == self.agent_id or profile_id not in self._sidebar_rows:
             return
         colors = self.palette()
         row = self._sidebar_rows[profile_id]
         color = colors["sidebar_active"] if active else colors["sidebar"]
-        for widget in (row["row"], row["dot"], row["name"]):
+        for widget in (row["row"], row["dot"], row["col"], row["name"], row["sub"]):
             widget.configure(bg=color)
 
     def _paint_agent_rows(self) -> None:
@@ -479,10 +516,21 @@ class App:
         for profile_id, row in self._sidebar_rows.items():
             selected = profile_id == self.agent_id
             background = colors["sidebar_active"] if selected else colors["sidebar"]
+            det = self._agent_meta.get(profile_id, {})
+            state = det.get("configState", "ok")
+            dot_color = {
+                "ok": colors["ok"],
+                "parse_error": colors["warn"],
+                "permission_error": colors["danger"],
+                "read_error": colors["danger"],
+                "plugin_only": colors["plugin"],
+            }.get(state, colors["ok"])
             row["row"].configure(bg=background)
-            row["dot"].configure(bg=background, fg=colors["ok"] if any(p.exists() for p in self.profiles[profile_id].paths) else colors["muted"])
+            row["col"].configure(bg=background)
+            row["dot"].configure(bg=background, fg=dot_color)
             row["name"].configure(bg=background, fg="#ffffff" if selected else colors["sidebar_text"],
                                   font=(FONT, 9, "bold") if selected else (FONT, 9))
+            row["sub"].configure(bg=background, fg=colors["muted"])
 
     def _init_sash(self) -> None:
         try:
@@ -530,10 +578,10 @@ class App:
         style.configure("App.Vertical.TScrollbar", background=colors["border"], troughcolor=colors["surface"],
                         bordercolor=colors["surface"], arrowcolor=colors["muted"])
 
-        for apply in self._themed:
-            apply()
+        self._themed = [apply for apply in self._themed if apply() is not False]
         for button, kind in self._buttons:
-            self._paint_button(button, kind)
+            if button.winfo_exists():
+                self._paint_button(button, kind)
         for menu in self._menus:
             menu.configure(bg=colors["surface"], fg=colors["text"], activebackground=colors["accent"],
                            activeforeground="#ffffff", bd=0)
@@ -556,18 +604,35 @@ class App:
 
     # ------------------------------------------------------------------ agents
     def current(self):
+        if self.agent_id is None or self.agent_id not in self.profiles:
+            raise RuntimeError("本机尚未检测到可用的 Agent 配置。请先安装 Agent 或创建其配置文件。")
+        return self.profiles[self.agent_id]
+
+    def _current_or_warn(self):
+        if self.agent_id is None or self.agent_id not in self.profiles:
+            messagebox.showinfo("未检测到 Agent", "当前没有选中的 Agent。", parent=self.root)
+            return None
         return self.profiles[self.agent_id]
 
     def select_agent(self, profile_id: str) -> None:
+        if profile_id not in self.detected:
+            return
         self.agent_id = profile_id
         self._paint_agent_rows()
         self.refresh_servers()
         self._save_settings()
 
     def refresh_agents(self) -> None:
-        for profile_id, profile in self.profiles.items():
-            exists = any(path.exists() for path in profile.paths)
-            self._sidebar_rows[profile_id]["dot"].configure(fg=self.palette()["ok"] if exists else self.palette()["muted"])
+        detected = profiles.detected_profiles(self.profiles)
+        self.detected = detected
+        if self.agent_id not in self.detected:
+            self.agent_id = "trae" if "trae" in self.detected else next(iter(self.detected), None)
+        if hasattr(self, "sidebar") and self.sidebar.winfo_exists():
+            self.sidebar.destroy()
+        self._themed = [apply for apply in self._themed if apply() is not False]
+        self._sidebar_rows.clear()
+        self._agent_meta.clear()
+        self._build_sidebar()
         self._paint_agent_rows()
 
     def refresh_all(self) -> None:
@@ -589,8 +654,18 @@ class App:
             self.tree.delete(item)
         self.rows.clear()
 
+        if self.agent_id is None or self.agent_id not in self.profiles:
+            self.hint.configure(
+                text="本机尚未检测到已安装的 Agent 配置。支持的类型定义在 mcpmanager/agents/*.toml，检测到配置文件后会自动显示。",
+                fg=self.palette()["warn"],
+            )
+            self._set_details("当前没有选中的 Agent。\n\n请先安装 Agent，或使用“扫描全部”/“刷新”重新检测。")
+            self.status_right.configure(text="未检测到 Agent")
+            return
+
         profile = self.current()
         data = registry.load()
+        managed_map = provenance.load_managed().get(profile.id, {})
         section: dict = {}
         sources: dict[str, Path] = {}
         error = ""
@@ -657,6 +732,13 @@ class App:
                 state += " · 路径缺失"
             field = registry.version_field(spec)
             version = str(spec.get(field, "")) if field else ""
+            managed_entry = managed_map.get(name) if isinstance(managed_map, dict) else None
+            source_cat = adapters.source_category(live, profile, managed_entry=managed_entry)
+            source_label = adapters.SOURCE_CATEGORY_LABELS.get(source_cat, "未知")
+            conflict_reason = sync._detect_conflict(name, live, profile, data, managed_entry) if here else None
+            if conflict_reason:
+                tag = "warn"
+                state += " · 冲突"
             self.rows[name] = {
                 "name": name,
                 "spec": spec,
@@ -668,6 +750,9 @@ class App:
                 "level": level,
                 "here": here,
                 "source": str(source) if source else "",
+                "sourceCategory": source_cat,
+                "sourceLabel": source_label,
+                "conflict": conflict_reason or "",
                 "aux": aux,
             }
 
@@ -675,6 +760,7 @@ class App:
         ordered = list(self.rows.values())
         key = {
             "MCP": lambda row: row["name"].lower(),
+            "来源": lambda row: row["sourceLabel"],
             "类型": lambda row: row["kind"].lower(),
             "版本": lambda row: row["version"],
             "状态": lambda row: row["state"],
@@ -682,10 +768,11 @@ class App:
         ordered.sort(key=key, reverse=self.sort_reverse)
 
         for index, row in enumerate(ordered):
-            if needle and needle not in f"{row['name']} {row['kind']} {row['state']}".lower():
+            if needle and needle not in f"{row['name']} {row['sourceLabel']} {row['kind']} {row['state']}".lower():
                 continue
             self.tree.insert(
-                "", "end", iid=row["name"], values=(row["name"], row["kind"], row["version"], row["state"]),
+                "", "end", iid=row["name"],
+                values=(row["name"], row["sourceLabel"], row["kind"], row["version"], row["state"]),
                 tags=(row["tag"], "odd" if index % 2 else "even"),
             )
 
@@ -892,6 +979,13 @@ class App:
                 parent=self.root,
             )
             return
+        if adapters.is_magpie_managed(row["live"]):
+            messagebox.showinfo(
+                "Magpie 管理",
+                f"{name} 已由 Magpie 管理，不应重复登记为普通本地 MCP。",
+                parent=self.root,
+            )
+            return
         if level != "manageable":
             messagebox.showerror(
                 "无法登记", f"{name} 的配置缺少有效的 command 或 url，无法登记。", parent=self.root
@@ -1045,7 +1139,9 @@ class App:
 
     # ------------------------------------------------------------- candidates
     def generate_candidate(self) -> None:
-        profile = self.current()
+        profile = self._current_or_warn()
+        if profile is None:
+            return
         if not profile.path.exists():
             if messagebox.askyesno(
                 "初始化配置", f"{profile.name} 还没有配置文件：\n{profile.path}\n\n现在创建吗？", parent=self.root
@@ -1062,7 +1158,10 @@ class App:
         self.show_preview(candidate.path)
 
     def show_candidate_preview(self) -> None:
-        self.show_preview(sync.candidate_path(self.current()))
+        profile = self._current_or_warn()
+        if profile is None:
+            return
+        self.show_preview(sync.candidate_path(profile))
 
     def show_preview(self, path: Path) -> None:
         if not path.exists():
@@ -1163,7 +1262,9 @@ class App:
         self.refresh_all()
 
     def init_config(self) -> None:
-        profile = self.current()
+        profile = self._current_or_warn()
+        if profile is None:
+            return
         if profile.path.exists():
             messagebox.showinfo("配置已存在", f"{profile.name} 已有配置文件：\n{profile.path}", parent=self.root)
             self._open(profile.path)
@@ -1936,7 +2037,9 @@ class App:
 
     # ------------------------------------------------------------- diagnostics
     def diagnose_current(self) -> None:
-        profile = self.current()
+        profile = self._current_or_warn()
+        if profile is None:
+            return
         try:
             rows = doctor.diagnose(profile)
         except Exception as exc:  # noqa: BLE001 - surfaced to the user
@@ -2117,7 +2220,9 @@ class App:
             self.log(f"请手动打开：{target}")
 
     def open_selected_config(self) -> None:
-        profile = self.current()
+        profile = self._current_or_warn()
+        if profile is None:
+            return
         if not profile.path.exists():
             messagebox.showerror("配置不存在", str(profile.path), parent=self.root)
             return

@@ -2,6 +2,27 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [1.4.0] - 2026-11-25
+
+### 新增
+
+- 新增 `status` 命令（`--json` 输出 `schemaVersion: 2`），汇总每个 Agent 的检测状态、配置状态、有效路径、junction/符号链接重定向、MCP 数量、来源分布、最近握手状态与多路径/冲突提示。
+- 新增 `local/managed.json` 受管标记与 `local/audit.jsonl` 同步审计记录，并提供 `mcpmanager audit` 命令查看同步历史。
+- 新增来源与能力分层（`managed` / `magpie_managed` / `user_config` / `plugin_host` / `remote` / `backup` / `candidate` / `market_cache`），同步时自动检测冲突并禁止静默覆盖用户手动配置或 Magpie 管理条目。
+- GUI Agent 侧栏改为根据本机实际配置动态显示（含状态色点、MCP 数、健康计数、多来源提示与无 Agent 空状态），主表新增“来源”列并阻止将 Magpie 管理的 MCP 重复登记为普通本地 MCP。
+
+### 修复
+
+- Codex profile 改为跟随 `CODEX_HOME`，支持迁移到 E 盘等自定义目录的安装，并在未设置时回退 `~/.codex/config.toml`。
+- 扫描器将 `CODEX_HOME` 纳入有效配置来源，避免把 Codex 误报为未配置。
+- `detect_agent()` 将 `plugin_only` 正确标记为 `detected: true`，并逐文件记录多配置路径的生效来源与被隐藏来源。
+- 候选差异与日志文本统一对 `Bearer`、`ApiKey`、`github_pat_`、`ghp_`、`sk-`、`XERJ_AUTH` 等凭据脱敏。
+- 修复 GUI 刷新侧栏重建后旧控件主题回调残留可能触发 `TclError` 的问题。
+
+### 测试
+
+- 新增 `tests/test_status_and_sync.py`，完整测试套件达到 98 项（Windows 下 97 通过、1 项 POSIX 专用用例按平台跳过）。
+
 ## [1.3.3] - 2026-11-15
 
 ### 修复

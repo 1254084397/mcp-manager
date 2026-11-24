@@ -44,6 +44,7 @@ DEFAULT_ROOTS = [
     paths.APPDATA / "Cursor" / "User",
     paths.HOME / ".config",
     paths.HOME / ".codex",
+    paths.CODEX_HOME,
     paths.HOME / ".claude",
     paths.HOME / ".cursor",
     paths.HOME / ".codeium" / "windsurf",
@@ -76,7 +77,7 @@ def source_type(path: Path, effective_paths: set[str] | None = None) -> str:
     filename = path.name.lower()
     if "candidate" in filename or "generated" in parts:
         return LEVEL_CANDIDATE
-    if parts & {"backups", "backup"} or "-before-apply" in filename or "legacy" in filename:
+    if parts & {"backups", "backup"} or "-before-apply" in filename or "before-restore" in filename or "legacy" in filename or filename.endswith(".bak"):
         return LEVEL_BACKUP
     if "marketplaces" in parts:
         return LEVEL_MARKET
@@ -142,7 +143,11 @@ def guess_format(path: Path) -> str:
 
 def discover_configs(profile_paths: list[Path] | None = None) -> list[dict]:
     """Return ``{path, sourceType, effective, servers}`` for every readable config."""
-    roots = list(DEFAULT_ROOTS) + extra_roots()
+    roots = list(DEFAULT_ROOTS)
+    dynamic_codex = paths.codex_home()
+    if dynamic_codex not in roots:
+        roots.append(dynamic_codex)
+    roots.extend(extra_roots())
     found: list[dict] = []
     seen: set[str] = set()
     effective_paths = {os.path.normcase(str(path)) for path in profile_paths or []}

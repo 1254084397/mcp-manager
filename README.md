@@ -66,6 +66,9 @@ python -m mcpmanager probe --agent trae --name context-mode --timeout 15 --json
 # 查看上次握手缓存
 python -m mcpmanager health --agent trae
 
+# 汇总每个 Agent 的实际配置路径、MCP 数量和最近健康状态
+python -m mcpmanager status
+
 # 只读模式：允许扫描、诊断、握手和报告，禁止写入、安装、升级
 python -m mcpmanager --read-only scan
 python -m mcpmanager --read-only doctor --agent trae
@@ -103,7 +106,7 @@ mcpmanager agents
 
 `python -m mcpmanager gui` 打开桌面管理器：
 
-- 左侧 Agent 侧栏，绿点表示该 Agent 至少一份配置文件存在；
+- 左侧 Agent 侧栏只显示本机实际检测到的 Agent；未发现配置的内置 profile 不再显示为灰色条目。CLI 仍可通过显式 Agent ID 管理未初始化的 profile；
 - 顶部搜索、列排序、右键菜单（诊断、握手测试、改版本、更新、从注册表移除、从当前 Agent 卸载）；
 - 可在“操作 → 添加 MCP…”中填写 command/URL、参数、环境变量和版本信息，登记后自动生成当前 Agent 的候选配置；
 - 添加流程只针对当前选中的 Agent，应用前可审阅候选和差异，写入时自动备份；管理器不会因此自动安装 MCP 包或浏览器等依赖；
@@ -127,6 +130,8 @@ mcpmanager agents
 | `doctor --agent ID [--network] [--env] [--json]` | 检查配置、command 路径、参数路径和本地运行时，可选探测远程 URL；`--json` 写入 `local/reports/` |
 | `probe --agent ID [--name MCP] [--timeout 秒] [--json]` | 真实启动 MCP，执行 initialize 和 tools/list；结果写入握手缓存 |
 | `health [--agent ID] [--json]` | 查看上次握手缓存（`local/health.json`） |
+| `status [--json]` | 汇总检测状态、有效/重定向路径、MCP 数量、来源分布、冲突与最近健康状态（`--json` 为 `schemaVersion: 2`） |
+| `audit [--agent ID] [--limit N] [--json]` | 查看 `local/audit.jsonl` 中的增量同步审计记录 |
 | `updates` | 对比注册表版本与 npm/PyPI 最新版本，区分已是最新、有新版本、当前更高、无法比较 |
 | `sync --agent ID [--apply] [--yes]` | 生成候选；`--apply` 备份后写入 |
 | `apply 候选文件 [--yes]` | 应用指定候选（含安装候选） |
@@ -148,7 +153,8 @@ mcpmanager/                核心代码
   catalog/servers.json     内置可安装 MCP 目录
   formats.py               JSON / JSONC / TOML 读写与局部替换
   adapters.py              标准字段 <-> 各 Agent 字段
-  sync.py                  候选生成、备份、应用
+  sync.py                  候选生成、增量合并、冲突保护、备份、应用
+  provenance.py            受管标记（managed.json）与同步审计记录（audit.jsonl）
   discovery.py             扫描与配置来源分级
   doctor.py                配置与运行时诊断
   handshake.py             MCP 协议握手（initialize / tools/list）
