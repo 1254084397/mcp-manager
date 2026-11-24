@@ -169,7 +169,16 @@ class CodexAndDiscoveryTests(unittest.TestCase):
 
         dead_widget.winfo_exists.return_value = False
         dead_widget.configure.side_effect = AssertionError("destroyed widget should not be configured")
-        fake_app._themed = [apply for apply in fake_app._themed if apply() is not False]
+        fake_app._prune_themed()
+        self.assertEqual(len(fake_app._themed), 1)
+
+        import tkinter as tk
+
+        def broken_cb():
+            raise tk.TclError('invalid command name ".!toplevel8.!frame.!entry"')
+
+        fake_app._themed.append(broken_cb)
+        fake_app._prune_themed()
         self.assertEqual(len(fake_app._themed), 1)
 
     def test_detected_profiles_only_includes_existing_primary_or_auxiliary_configs(self):

@@ -212,6 +212,16 @@ class App:
         self._themed.append(apply)
         apply()
 
+    def _prune_themed(self) -> None:
+        alive = []
+        for apply in self._themed:
+            try:
+                if apply() is not False:
+                    alive.append(apply)
+            except tk.TclError:
+                continue
+        self._themed = alive
+
     def _button(self, parent, text: str, command, kind: str = "ghost") -> tk.Button:
         button = tk.Button(
             parent,
@@ -356,8 +366,10 @@ class App:
         self.search_entry.pack(side="left", ipady=5)
         self._theme(self.search_entry, bg="surface", fg="text", insert="text")
         self._themed.append(
-            lambda: self.search_entry.configure(highlightbackground=self.palette()["border"],
-                                                highlightcolor=self.palette()["accent"])
+            lambda: self.search_entry.winfo_exists() and self.search_entry.configure(
+                highlightbackground=self.palette()["border"],
+                highlightcolor=self.palette()["accent"],
+            ) is None
         )
 
         for text, command, kind in (
@@ -578,7 +590,7 @@ class App:
         style.configure("App.Vertical.TScrollbar", background=colors["border"], troughcolor=colors["surface"],
                         bordercolor=colors["surface"], arrowcolor=colors["muted"])
 
-        self._themed = [apply for apply in self._themed if apply() is not False]
+        self._prune_themed()
         for button, kind in self._buttons:
             if button.winfo_exists():
                 self._paint_button(button, kind)
@@ -629,7 +641,7 @@ class App:
             self.agent_id = "trae" if "trae" in self.detected else next(iter(self.detected), None)
         if hasattr(self, "sidebar") and self.sidebar.winfo_exists():
             self.sidebar.destroy()
-        self._themed = [apply for apply in self._themed if apply() is not False]
+        self._prune_themed()
         self._sidebar_rows.clear()
         self._agent_meta.clear()
         self._build_sidebar()
@@ -1321,11 +1333,13 @@ class App:
             entry.insert(0, value)
             entry.pack(fill="x", ipady=5)
             self._themed.append(
-                lambda e=entry: e.configure(
-                    bg=self.palette()["surface"], fg=self.palette()["text"],
-                    insertbackground=self.palette()["text"],
-                    highlightbackground=self.palette()["border"],
-                    highlightcolor=self.palette()["accent"],
+                lambda e=entry: (
+                    False if not e.winfo_exists() else e.configure(
+                        bg=self.palette()["surface"], fg=self.palette()["text"],
+                        insertbackground=self.palette()["text"],
+                        highlightbackground=self.palette()["border"],
+                        highlightcolor=self.palette()["accent"],
+                    ) is None
                 )
             )
             fields[key] = entry
@@ -1348,11 +1362,13 @@ class App:
                 insertbackground=colors["text"], highlightthickness=1,
             )
             self._themed.append(
-                lambda e=entry: e.configure(
-                    bg=self.palette()["surface"], fg=self.palette()["text"],
-                    insertbackground=self.palette()["text"],
-                    highlightbackground=self.palette()["border"],
-                    highlightcolor=self.palette()["accent"],
+                lambda e=entry: (
+                    False if not e.winfo_exists() else e.configure(
+                        bg=self.palette()["surface"], fg=self.palette()["text"],
+                        insertbackground=self.palette()["text"],
+                        highlightbackground=self.palette()["border"],
+                        highlightcolor=self.palette()["accent"],
+                    ) is None
                 )
             )
             return entry
