@@ -1,0 +1,11 @@
+id = "pi"
+name = "Pi"
+config = "{home}/.pi/agent/mcp.json"
+format = "json"
+schema = "mcpServers"
+skills = "{home}/.pi/agent/skills"
+shared_skills_reader = true
+shared_skills = "{home}/.agents/skills"
+executables = ["pi"]
+aliases = ["pi-cli"]
+notes = "Pi Coding Agent 用户级 mcp.json。"

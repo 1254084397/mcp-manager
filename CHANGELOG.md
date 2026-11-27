@@ -2,6 +2,23 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [1.6.0] - 2026-11-28
+
+### 新增
+
+- **GUI「Skills 管理」独立窗口（`Ctrl+S`）**：支持按运行目标（Windows / WSL）、源与目标 Agent、三种同步模式（逐项软链接 / 共享目录 / 独立复制）及推荐 Skill 集合规划同步；提供逐项勾选、差异预览、备份查看与一键回滚。
+- **Windows 与 WSL 两层发现模型**：在已知 profile 检测基础上新增未知 Agent 自动发现（`discovered-<hash>`），默认标记为只读并拦截写入与 Skills 同步；正式新增 Windows 版 [pi.toml](mcpmanager/agents/pi.toml)，并将 `.trae-cn` / `.trae-aicc` 归属到 Trae CN / Trae SOLO CN 附加配置。
+- **Agent 确认度分级与有效 Skills 统计**：区分 `confirmed` / `configured` / `residual` / `unknown_readonly` 四种身份状态，主侧栏默认只显示已确认 Agent，未确认残留与未知配置收纳在可折叠分组中（支持右键确认、标记残留或忽略并保存到 `local/agent-identity.json`）；按真实配置识别 Magpie 路由状态（`routed` / `hybrid` / `direct`），并统计去重后的有效 Skills 数量。
+
+### 改进与修复
+
+- **启动与界面体验优化**：窗口启动时先隐身完成主题应用再显示，消除白框闪烁；启动与「刷新」的 WSL / Agent 扫描移入后台线程；统一采用细窄极简滚动条、1px 卡片边框与按钮悬停反馈，并为侧栏、详情与日志区补齐垂直滚动条。
+- 修复「Skills 管理」点击全不选时 `include=[]` 退化为全选的问题，以及共享目录模式下禁止逐项部分筛选。
+
+### 测试
+
+- 完整测试套件达到 119 项（Windows 下 118 通过、1 项按平台跳过）。
+
 ## [1.5.0] - 2026-11-27
 
 ### 新增

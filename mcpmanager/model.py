@@ -30,6 +30,10 @@ class Profile:
     readonly: bool = False
     auxiliary_optional: bool = True
     config_priority: str = "primary-first"
+    skills: str = ""
+    shared_skills_reader: bool = False
+    shared_skills: str = ""
+    executables: list[str] = field(default_factory=list)
     aliases: list[str] = field(default_factory=list)
     notes: str = ""
     source: str = ""
@@ -61,8 +65,12 @@ class Profile:
             self.configs = [self.configs]
         if isinstance(self.aliases, str):
             self.aliases = [self.aliases]
+        if isinstance(self.executables, str):
+            self.executables = [self.executables]
         if not isinstance(self.configs, list) or not all(isinstance(item, str) for item in self.configs):
             raise ValueError(f"{self.id}: configs 必须是字符串数组")
+        if not isinstance(self.executables, list) or not all(isinstance(item, str) for item in self.executables):
+            raise ValueError(f"{self.id}: executables 必须是字符串数组")
         if not isinstance(self.aliases, list) or not all(isinstance(item, str) for item in self.aliases):
             raise ValueError(f"{self.id}: aliases 必须是字符串数组")
         if not isinstance(self.auxiliary_optional, bool):

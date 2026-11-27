@@ -1,7 +1,12 @@
 id = "trae"
 name = "Trae CN"
 config = "{appdata}/Trae CN/User/mcp.json"
+configs = ["{home}/.trae-cn/mcp.json"]
 format = "json"
 schema = "mcpServers"
+skills = "{home}/.trae-cn/skills"
+shared_skills_reader = true
+shared_skills = "{home}/.agents/skills"
+executables = ["trae", "Trae CN"]
 aliases = ["trae-cn"]
 notes = "Trae IDE 国内版，用户级 mcp.json。"

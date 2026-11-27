@@ -223,6 +223,10 @@ def plan_skills_sync(
         raise KeyError(f"目标 {target.id} 中未检测到源 Agent：{source_agent}")
     if dest_agent not in agents:
         raise KeyError(f"目标 {target.id} 中未检测到目标 Agent：{dest_agent}")
+    if agents[source_agent].get("readonly"):
+        raise ValueError(f"源 Agent {source_agent} 为只读或未知 Agent，仅支持查看，不能作为 Skills 同步源。")
+    if agents[dest_agent].get("readonly"):
+        raise ValueError(f"目标 Agent {dest_agent} 为只读或未知 Agent，仅支持查看，不能作为 Skills 同步目标。")
 
     src_info = agents[source_agent]
     dst_info = agents[dest_agent]
@@ -265,7 +269,10 @@ def plan_skills_sync(
                 "为保护已有用户数据，shared-directory 不会删除非空目录；请使用 symlink-per-entry 或显式传入 --replace。"
             )
 
-    wanted = set(include) if include else set(src_scan["entries"])
+    if mode == "shared-directory" and include is not None and set(include) != set(src_scan["entries"]):
+        raise ValueError("shared-directory 模式会共享整个源目录，不支持逐项筛选；请改用 symlink-per-entry 或 copy。")
+
+    wanted = set(src_scan["entries"]) if include is None else set(include)
     available = [name for name in src_scan["entries"] if name in wanted]
     missing = sorted(name for name in wanted if name not in src_scan["entries"])
     owned = _owned_entries(target.id, dest_agent)
@@ -520,3 +527,155 @@ def apply_skills_sync(plan: dict[str, Any]) -> dict[str, Any]:
         "preserved": plan.get("preserved", []),
         "backup": str(backup_path) if backup_path else None,
     }
+
+
+def summarize_skills_plan_rows(
+    plan: dict[str, Any],
+    source_entries: list[str] | None = None,
+    dest_entries: list[str] | None = None,
+) -> list[dict[str, str]]:
+    """Build structured GUI/CLI table rows from a skills sync plan."""
+    src_set = set(source_entries or [])
+    dst_set = set(dest_entries or [])
+    added = set(plan.get("added", []))
+    updated = set(plan.get("updated", []))
+    kept = set(plan.get("kept", []))
+    preserved = set(plan.get("preserved", []))
+    conflict_map = {
+        str(item.get("name")): str(item.get("reason", "存在冲突"))
+        for item in plan.get("conflicts", [])
+        if isinstance(item, dict) and item.get("name")
+    }
+    skipped_map = {
+        str(item.get("name")): str(item.get("reason", "已跳过"))
+        for item in plan.get("skipped", [])
+        if isinstance(item, dict) and item.get("name")
+    }
+
+    ordered_names: list[str] = []
+    seen: set[str] = set()
+    for name in [
+        *(source_entries or []),
+        *plan.get("added", []),
+        *plan.get("updated", []),
+        *plan.get("kept", []),
+        *conflict_map.keys(),
+        *plan.get("preserved", []),
+        *(dest_entries or []),
+    ]:
+        if name and name not in seen:
+            seen.add(name)
+            ordered_names.append(name)
+
+    rows: list[dict[str, str]] = []
+    for name in ordered_names:
+        if name in preserved or name.startswith("."):
+            rows.append({
+                "skill": name,
+                "sourceState": "系统目录",
+                "destState": "保留",
+                "action": "不处理",
+                "tag": "plugin",
+                "note": "系统目录（自动保留）",
+                "selectable": "0",
+            })
+        elif name in conflict_map:
+            rows.append({
+                "skill": name,
+                "sourceState": "已存在" if name in src_set or not src_set else "缺失",
+                "destState": "目标已修改/非受管",
+                "action": "冲突",
+                "tag": "warn",
+                "note": conflict_map[name],
+                "selectable": "1",
+            })
+        elif name in added:
+            rows.append({
+                "skill": name,
+                "sourceState": "已存在",
+                "destState": "未配置",
+                "action": "新增",
+                "tag": "ok",
+                "note": f"将按 {plan.get('mode', '')} 同步",
+                "selectable": "1",
+            })
+        elif name in updated:
+            rows.append({
+                "skill": name,
+                "sourceState": "已修改",
+                "destState": "需更新",
+                "action": "更新",
+                "tag": "registered",
+                "note": f"将按 {plan.get('mode', '')} 更新",
+                "selectable": "1",
+            })
+        elif name in kept:
+            rows.append({
+                "skill": name,
+                "sourceState": "已存在",
+                "destState": "已同步",
+                "action": "保留",
+                "tag": "missing",
+                "note": "内容一致或已共享",
+                "selectable": "1",
+            })
+        elif name in skipped_map:
+            rows.append({
+                "skill": name,
+                "sourceState": "已存在" if name in src_set else "未选择",
+                "destState": "已存在" if name in dst_set else "未配置",
+                "action": "跳过",
+                "tag": "missing",
+                "note": skipped_map[name],
+                "selectable": "1",
+            })
+        elif name in dst_set and name not in src_set:
+            rows.append({
+                "skill": name,
+                "sourceState": "仅目标存在",
+                "destState": "已存在",
+                "action": "保留",
+                "tag": "missing",
+                "note": "目标独有 Skill（不会删除）",
+                "selectable": "0",
+            })
+        else:
+            rows.append({
+                "skill": name,
+                "sourceState": "已存在" if name in src_set else "未知",
+                "destState": "已存在" if name in dst_set else "未配置",
+                "action": "未选中",
+                "tag": "missing",
+                "note": "未包含在本次同步范围",
+                "selectable": "1",
+            })
+    return rows
+
+
+def format_skills_plan_diff(plan: dict[str, Any]) -> str:
+    """Format a human-readable diff summary for a Skills sync plan."""
+    lines = [
+        f"运行目标   {plan.get('target', '')}",
+        f"同步方向   {plan.get('sourceAgent', '')} ({plan.get('sourcePath', '')}) -> "
+        f"{plan.get('destAgent', '')} ({plan.get('destPath', '')})",
+        f"同步模式   {plan.get('mode', '')}" + ("  [--replace]" if plan.get("replace") else ""),
+        f"目标快照   {plan.get('destSnapshotHash', '')}",
+        "",
+    ]
+    if plan.get("alreadyShared"):
+        lines.append("= 源目录与目标目录指向同一物理路径（alreadyShared），无需同步。")
+        return "\n".join(lines)
+    if plan.get("alreadySynced"):
+        lines.append("= 当前已处于同步状态（alreadySynced），无需变更。")
+    for name in plan.get("added", []):
+        lines.append(f"+ {name}  [新增 -> {plan.get('mode')}]")
+    for name in plan.get("updated", []):
+        lines.append(f"~ {name}  [更新 -> {plan.get('mode')}]")
+    for name in plan.get("kept", []):
+        lines.append(f"= {name}  [保留]")
+    for item in plan.get("conflicts", []):
+        if isinstance(item, dict):
+            lines.append(f"! {item.get('name', '')}  [冲突] {item.get('reason', '')}")
+    for name in plan.get("preserved", []):
+        lines.append(f"# {name}  [系统目录保留]")
+    return "\n".join(lines)

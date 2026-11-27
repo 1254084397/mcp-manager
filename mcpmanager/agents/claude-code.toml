@@ -3,5 +3,7 @@ name = "Claude Code"
 config = "{home}/.claude.json"
 format = "json"
 schema = "mcpServers"
+skills = "{home}/.claude/skills"
+executables = ["claude"]
 aliases = ["claude-cli"]
 notes = "Claude Code CLI 把用户级 MCP 存放在 ~/.claude.json 顶层；该文件很大，同步只替换 mcpServers 区块。"

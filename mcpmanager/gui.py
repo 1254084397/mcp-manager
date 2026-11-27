@@ -20,7 +20,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from . import (__version__, adapters, context_audit, creation, discovery, doctor, formats,
-               handshake, health, paths, profiles, provenance, registry, sync, targets, versioning)
+               handshake, health, paths, profiles, provenance, registry, skills, sync, targets, versioning)
 
 FONT = "Microsoft YaHei UI"
 MONO = "Consolas"
@@ -97,10 +97,8 @@ class App:
 
         self.settings = self._load_settings()
         self.dark = bool(self.settings.get("dark"))
-        self.detected = profiles.detected_profiles(self.profiles)
-        self.agent_id = self.settings.get("agent") if self.settings.get("agent") in self.detected else (
-            "trae" if "trae" in self.detected else next(iter(self.detected), None)
-        )
+        self.detected = {}
+        self.agent_id = self.settings.get("agent")
         self.sort_column = "MCP"
         self.sort_reverse = False
         self.busy = False
@@ -110,11 +108,19 @@ class App:
         self._sidebar_rows: dict[str, dict] = {}
         self._agent_meta: dict[str, dict] = {}
         self._wsl_agents: dict[str, dict] = {}
+        self._discovered_win_agents: dict[str, dict] = {}
+        self._win_target_agents: dict[str, dict] = {}
         self._wsl_targets: list[dict] = []
+        self._precomputed_win_meta: dict[str, dict] = {}
+        self._precomputed_win_skills: dict[str, int] = {}
+        self._initial_loading: bool = True
+        self._show_residual: bool = False
         self.selected_target: str = "windows"
 
         self._enable_dpi()
         self.root = tk.Tk()
+        self.root.withdraw()
+        self.root.configure(bg=self.palette()["bg"])
         self.root.title(f"MCP Manager {__version__}")
         if paths.ICON_PATH.exists():
             try:
@@ -132,14 +138,13 @@ class App:
         self._build_body()
         self._bind_keys()
         self.apply_theme()
-        self.refresh_agents()
-        self.refresh_servers()
-        self.set_status("就绪（只读模式）" if paths.read_only() else "就绪")
-        self._set_details("在左侧选择 Agent，再选择一条 MCP 查看详情。")
-        self.root.after(250, self._init_sash)
+        self.set_status("启动中：正在检测运行目标…")
+        self._set_details("正在检测本机 Agent 和运行目标…")
         if self.settings.get("log_visible", True) is False:
             self._toggle_log()
-        self.root.after(300, lambda: self.log("就绪。选择左侧 Agent 查看其 MCP。"))
+        self.root.deiconify()
+        self.root.after(250, self._init_sash)
+        self.root.after(0, self._initial_refresh)
         self.root.mainloop()
 
     # ------------------------------------------------------------------ setup
@@ -182,7 +187,7 @@ class App:
             "dark": self.dark,
             "agent": self.agent_id,
             "geometry": self.root.geometry(),
-            "log_visible": bool(self.log_box.winfo_manager()),
+            "log_visible": bool(self.log_body.winfo_manager()),
         }
         try:
             (paths.DATA_DIR / "settings.json").write_text(
@@ -234,14 +239,30 @@ class App:
             relief="flat",
             bd=0,
             cursor="hand2",
-            font=(FONT, 9),
+            font=(FONT, 9, "bold") if kind == "accent" else (FONT, 9),
             padx=12,
-            pady=6,
-            highlightthickness=0,
+            pady=5 if kind == "header" else 6,
+            highlightthickness=1 if kind in {"ghost", "header"} else 0,
         )
         self._buttons.append((button, kind))
         self._paint_button(button, kind)
+        button.bind("<Enter>", lambda _e, b=button, k=kind: self._hover_button(b, k, True))
+        button.bind("<Leave>", lambda _e, b=button, k=kind: self._hover_button(b, k, False))
         return button
+
+    def _hover_button(self, button: tk.Button, kind: str, active: bool) -> None:
+        if not button.winfo_exists():
+            return
+        colors = self.palette()
+        if kind == "accent":
+            button.configure(bg=colors["accent_hover"] if active else colors["accent"])
+        elif kind == "header":
+            button.configure(
+                bg=colors["accent"] if active else colors["sidebar_active"],
+                fg="#ffffff" if active else colors["sidebar_text"],
+            )
+        else:
+            button.configure(bg=colors["surface2"] if active else colors["surface"])
 
     def _paint_button(self, button: tk.Button, kind: str) -> None:
         colors = self.palette()
@@ -249,11 +270,18 @@ class App:
             button.configure(bg=colors["accent"], fg="#ffffff", activebackground=colors["accent_hover"],
                              activeforeground="#ffffff")
         elif kind == "header":
-            button.configure(bg=colors["header"], fg=colors["sidebar_text"], activebackground=colors["sidebar_active"],
-                             activeforeground="#ffffff")
+            button.configure(
+                bg=colors["sidebar_active"], fg=colors["sidebar_text"],
+                activebackground=colors["accent"], activeforeground="#ffffff",
+                highlightbackground=colors["border"] if self.dark else "#1e293b",
+                highlightcolor=colors["accent"],
+            )
         else:
-            button.configure(bg=colors["surface"], fg=colors["text"], activebackground=colors["surface2"],
-                             activeforeground=colors["text"])
+            button.configure(
+                bg=colors["surface"], fg=colors["text"], activebackground=colors["surface2"],
+                activeforeground=colors["text"],
+                highlightbackground=colors["border"], highlightcolor=colors["accent"],
+            )
 
     # ------------------------------------------------------------------- menu
     def _build_menu(self) -> None:
@@ -275,6 +303,7 @@ class App:
         action_menu.add_separator()
         action_menu.add_command(label="诊断当前 Agent", accelerator="Ctrl+D", command=self.diagnose_current)
         action_menu.add_command(label="上下文与 Skill 审计…", accelerator="Ctrl+K", command=self.open_context_audit)
+        action_menu.add_command(label="Skills 管理…", accelerator="Ctrl+S", command=self.open_skills_manager)
         action_menu.add_command(label="检查本机运行时", command=self.check_runtime)
         action_menu.add_separator()
         action_menu.add_command(label="备份全部配置", command=self.backup_all)
@@ -313,6 +342,7 @@ class App:
         self.header_buttons.pack(side="right", padx=18)
         self._theme(self.header_buttons, bg="header")
         for text, command in (
+            ("Skills 管理", self.open_skills_manager),
             ("上下文审计", self.open_context_audit),
             ("检查更新", self.check_updates),
             ("扫描全部", self.scan_all),
@@ -393,12 +423,17 @@ class App:
         self.hint.pack(fill="x", pady=(8, 6))
         self._theme(self.hint, bg="bg", fg="muted")
 
+        self._build_log()
+
         self.paned = ttk.Panedwindow(self.content, orient="vertical", style="App.TPanedwindow")
         self.paned.pack(fill="both", expand=True)
 
-        tree_card = tk.Frame(self.paned)
+        tree_card = tk.Frame(self.paned, highlightthickness=1)
         self.paned.add(tree_card, weight=4)
         self._theme(tree_card, bg="surface")
+        self._themed.append(
+            lambda c=tree_card: c.winfo_exists() and c.configure(highlightbackground=self.palette()["border"]) is None
+        )
 
         columns = ("MCP", "来源", "类型", "版本", "状态")
         self.tree = ttk.Treeview(
@@ -415,9 +450,12 @@ class App:
         self.tree.bind("<Button-3>", self._on_context)
         self.tree.bind("<Double-1>", lambda _event: self.open_selected_config())
 
-        details_card = tk.Frame(self.paned)
+        details_card = tk.Frame(self.paned, highlightthickness=1)
         self.paned.add(details_card, weight=2)
         self._theme(details_card, bg="surface")
+        self._themed.append(
+            lambda c=details_card: c.winfo_exists() and c.configure(highlightbackground=self.palette()["border"]) is None
+        )
 
         details_head = tk.Frame(details_card)
         details_head.pack(fill="x", padx=12, pady=(8, 0))
@@ -428,18 +466,28 @@ class App:
         copy_button = self._button(details_head, "复制启动命令", self.copy_command, "ghost")
         copy_button.pack(side="right")
 
+        details_body = tk.Frame(details_card)
+        details_body.pack(fill="both", expand=True, padx=6, pady=(4, 8))
+        self._theme(details_body, bg="surface")
+
         self.details = tk.Text(
-            details_card, height=5, wrap="word", relief="flat", bd=0, padx=12, pady=8, font=(MONO, 9),
+            details_body, height=5, wrap="word", relief="flat", bd=0, padx=12, pady=8, font=(MONO, 9),
             state="disabled", highlightthickness=0,
         )
-        self.details.pack(fill="both", expand=True, padx=6, pady=(4, 8))
+        details_scroll = ttk.Scrollbar(
+            details_body, orient="vertical", command=self.details.yview, style="App.Vertical.TScrollbar"
+        )
+        self.details.configure(yscrollcommand=details_scroll.set)
+        self.details.pack(side="left", fill="both", expand=True)
+        details_scroll.pack(side="right", fill="y")
         self._theme(self.details, bg="surface", fg="text", insert="text")
-
-        self._build_log()
 
     def _build_sidebar(self) -> None:
         self.sidebar = tk.Frame(self.body, width=238)
-        self.sidebar.pack(side="left", fill="y")
+        if hasattr(self, "content") and self.content.winfo_exists():
+            self.sidebar.pack(side="left", fill="y", before=self.content)
+        else:
+            self.sidebar.pack(side="left", fill="y")
         self.sidebar.pack_propagate(False)
         self._theme(self.sidebar, bg="sidebar")
 
@@ -447,13 +495,54 @@ class App:
         heading.pack(fill="x", padx=18, pady=(16, 6))
         self._theme(heading, bg="sidebar", fg="muted")
 
-        win_head = tk.Label(self.sidebar, text="▸ Windows 本机（在线）", font=(FONT, 8, "bold"), anchor="w")
+        footer = tk.Label(self.sidebar, text=f"数据目录\n{paths.DATA_DIR}", font=(FONT, 8),
+                          justify="left", anchor="w", wraplength=200)
+        footer.pack(side="bottom", fill="x", padx=18, pady=12)
+        self._theme(footer, bg="sidebar", fg="muted")
+
+        sb_wrap = tk.Frame(self.sidebar)
+        sb_wrap.pack(fill="both", expand=True)
+        self._theme(sb_wrap, bg="sidebar")
+
+        sb_canvas = tk.Canvas(sb_wrap, bd=0, highlightthickness=0)
+        sb_scroll = ttk.Scrollbar(sb_wrap, orient="vertical", command=sb_canvas.yview, style="App.Vertical.TScrollbar")
+        sb_canvas.configure(yscrollcommand=sb_scroll.set)
+        sb_scroll.pack(side="right", fill="y")
+        sb_canvas.pack(side="left", fill="both", expand=True)
+        self._theme(sb_canvas, bg="sidebar")
+
+        sb_inner = tk.Frame(sb_canvas)
+        self._theme(sb_inner, bg="sidebar")
+        sb_win = sb_canvas.create_window((0, 0), window=sb_inner, anchor="nw")
+        sb_inner.bind("<Configure>", lambda _e: sb_canvas.configure(scrollregion=sb_canvas.bbox("all")))
+        sb_canvas.bind("<Configure>", lambda e: sb_canvas.itemconfigure(sb_win, width=e.width))
+
+        def _scroll_sidebar(event) -> None:
+            if sb_canvas.winfo_exists():
+                sb_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        sb_canvas.bind("<MouseWheel>", _scroll_sidebar)
+        sb_inner.bind("<MouseWheel>", _scroll_sidebar)
+
+        win_head = tk.Label(sb_inner, text="▸ Windows 本机（在线）", font=(FONT, 8, "bold"), anchor="w")
         win_head.pack(fill="x", padx=14, pady=(4, 2))
         self._theme(win_head, bg="sidebar", fg="info")
+        win_head.bind("<MouseWheel>", _scroll_sidebar)
 
-        if not self.detected and not self._wsl_agents:
+        if getattr(self, "_initial_loading", False):
+            loading = tk.Label(
+                sb_inner,
+                text="正在检测运行目标…\nWindows 本机\nWSL 发行版",
+                font=(FONT, 9),
+                justify="left",
+                anchor="w",
+                wraplength=200,
+            )
+            loading.pack(fill="x", padx=18, pady=12)
+            self._theme(loading, bg="sidebar", fg="muted")
+        elif not self.detected and not self._wsl_agents:
             empty = tk.Label(
-                self.sidebar,
+                sb_inner,
                 text="未检测到已安装的 Agent\n\n仅显示本机存在有效配置的 Agent。",
                 font=(FONT, 9),
                 justify="left",
@@ -464,24 +553,67 @@ class App:
             self._theme(empty, bg="sidebar", fg="muted")
 
         cached_health = health.load()
-        for profile in self.detected.values():
-            det = profiles.detect_agent(profile)
-            self._agent_meta[profile.id] = det
-            sk_dir = context_audit._skill_dir_for(profile)
-            sk_count, _sk_exists, _sk_link = targets._count_posix_skills(sk_dir) if sk_dir else (0, False, False)
-            row = tk.Frame(self.sidebar, cursor="hand2")
-            row.pack(fill="x", padx=10, pady=2)
+        residual_items: list[tuple[str, str, dict, str]] = []
+
+        def _skill_text(meta: dict, fallback_count: int) -> str:
+            eff = meta.get("effectiveSkillsCount")
+            loc = meta.get("localSkillsCount")
+            shr = meta.get("sharedSkillsCount", 0)
+            if eff is not None and shr:
+                return f"{eff} 有效Skill({loc}专属)"
+            return f"{eff if eff is not None else fallback_count} Skill"
+
+        def _route_text(meta: dict) -> str:
+            mode = meta.get("mcpRoutingMode")
+            if mode == "routed":
+                return "Magpie路由"
+            if mode == "hybrid":
+                return "Magpie混合"
+            if mode == "direct":
+                return "直连·无Hub"
+            return ""
+
+        def _add_sidebar_row(select_id: str, qid: str, label: str, sub_text: str, meta: dict) -> None:
+            self._agent_meta[select_id] = meta
+            row = tk.Frame(sb_inner, cursor="hand2")
+            row.pack(fill="x", padx=8, pady=2)
             dot = tk.Label(row, text="●", font=(FONT, 9), width=2)
             dot.pack(side="left", padx=(6, 0), anchor="n", pady=5)
             text_col = tk.Frame(row)
             text_col.pack(side="left", fill="x", expand=True, pady=4)
-            name = tk.Label(text_col, text=profile.name, font=(FONT, 9), anchor="w")
+            name = tk.Label(text_col, text=label, font=(FONT, 9), anchor="w")
             name.pack(fill="x")
+            sub = tk.Label(text_col, text=sub_text, font=(FONT, 8), anchor="w")
+            sub.pack(fill="x")
+            self._sidebar_rows[select_id] = {"row": row, "dot": dot, "col": text_col, "name": name, "sub": sub}
+            for widget in (row, dot, text_col, name, sub):
+                widget.bind("<Button-1>", lambda _event, sid=select_id: self.select_agent(sid))
+                widget.bind("<Button-3>", lambda event, key=qid, sid=select_id: self._on_agent_context(event, key, sid))
+                widget.bind("<MouseWheel>", _scroll_sidebar)
+            row.bind("<Enter>", lambda _event, sid=select_id: self._hover_agent(sid, True))
+            row.bind("<Leave>", lambda _event, sid=select_id: self._hover_agent(sid, False))
+
+        win_target_map = getattr(self, "_win_target_agents", {})
+        for profile in self.detected.values():
+            det = dict(self._precomputed_win_meta.get(profile.id) or profiles.detect_agent(profile))
+            t_meta = win_target_map.get(profile.id, {})
+            if t_meta:
+                det.update({
+                    k: t_meta[k] for k in (
+                        "identityState", "confidence", "evidence", "configResidual",
+                        "mcpRoutingMode", "magpieHubConfigured", "localSkillsCount",
+                        "sharedSkillsCount", "effectiveSkillsCount",
+                    ) if k in t_meta
+                })
+            sk_count = self._precomputed_win_skills.get(profile.id, 0)
             checks = cached_health.get(profile.id, {})
             ok = sum(1 for item in checks.values() if isinstance(item, dict) and item.get("ok") is True)
             fail = sum(1 for item in checks.values() if isinstance(item, dict) and item.get("ok") is False)
             count_text = "-" if det["mcpCount"] is None else str(det["mcpCount"])
-            sub_parts = [f"{count_text} MCP", f"{sk_count} Skill", f"{ok}✓/{fail}✗"]
+            sub_parts = [f"{count_text} MCP", _skill_text(det, sk_count), f"{ok}✓/{fail}×"]
+            rt = _route_text(det)
+            if rt:
+                sub_parts.append(rt)
             if det["hasMultipleSources"]:
                 sub_parts.append("多来源")
             if det["configState"] == "parse_error":
@@ -490,47 +622,57 @@ class App:
                 sub_parts.append("读取错误")
             elif det["configState"] == "plugin_only":
                 sub_parts.append("仅插件")
-            sub = tk.Label(text_col, text=" · ".join(sub_parts), font=(FONT, 8), anchor="w")
-            sub.pack(fill="x")
-            self._sidebar_rows[profile.id] = {"row": row, "dot": dot, "col": text_col, "name": name, "sub": sub}
-            for widget in (row, dot, text_col, name, sub):
-                widget.bind("<Button-1>", lambda _event, pid=profile.id: self.select_agent(pid))
-            row.bind("<Enter>", lambda _event, pid=profile.id: self._hover_agent(pid, True))
-            row.bind("<Leave>", lambda _event, pid=profile.id: self._hover_agent(pid, False))
+            qid = f"windows/{profile.id}"
+            id_state = det.get("identityState", "confirmed")
+            if id_state == "confirmed":
+                _add_sidebar_row(profile.id, qid, f"✓ {profile.name}", " · ".join(sub_parts), det)
+            else:
+                tag_lbl = "疑似残留" if id_state == "residual" else "仅配置"
+                residual_items.append((profile.id, qid, det, f"? {profile.name} ({tag_lbl})"))
+
+        for wag in getattr(self, "_discovered_win_agents", {}).values():
+            qid = wag["qualifiedId"]
+            residual_items.append((qid, qid, wag, f"? {wag['name']}"))
 
         for t_info in self._wsl_targets:
             t_state = "在线" if t_info["online"] else "离线"
-            t_head = tk.Label(self.sidebar, text=f"▸ {t_info['name']}（{t_state}）", font=(FONT, 8, "bold"), anchor="w")
+            t_head = tk.Label(sb_inner, text=f"▸ {t_info['name']}（{t_state}）", font=(FONT, 8, "bold"), anchor="w")
             t_head.pack(fill="x", padx=14, pady=(10, 2))
             self._theme(t_head, bg="sidebar", fg="plugin" if t_info["online"] else "muted")
+            t_head.bind("<MouseWheel>", _scroll_sidebar)
             for wag in t_info.get("agents", []):
                 qid = wag["qualifiedId"]
-                self._agent_meta[qid] = wag
-                row = tk.Frame(self.sidebar, cursor="hand2")
-                row.pack(fill="x", padx=10, pady=2)
-                dot = tk.Label(row, text="●", font=(FONT, 9), width=2)
-                dot.pack(side="left", padx=(6, 0), anchor="n", pady=5)
-                text_col = tk.Frame(row)
-                text_col.pack(side="left", fill="x", expand=True, pady=4)
-                name = tk.Label(text_col, text=wag["name"], font=(FONT, 9), anchor="w")
-                name.pack(fill="x")
                 mc = "-" if wag["mcpCount"] is None else str(wag["mcpCount"])
-                sub = tk.Label(text_col, text=f"{mc} MCP · {wag['skillsCount']} Skill · WSL", font=(FONT, 8), anchor="w")
-                sub.pack(fill="x")
-                self._sidebar_rows[qid] = {"row": row, "dot": dot, "col": text_col, "name": name, "sub": sub}
-                for widget in (row, dot, text_col, name, sub):
-                    widget.bind("<Button-1>", lambda _event, key=qid: self.select_agent(key))
-                row.bind("<Enter>", lambda _event, key=qid: self._hover_agent(key, True))
-                row.bind("<Leave>", lambda _event, key=qid: self._hover_agent(key, False))
+                id_state = wag.get("identityState", "confirmed" if not wag.get("discovered") else "unknown_readonly")
+                if id_state == "confirmed":
+                    sub_parts = [f"{mc} MCP", _skill_text(wag, wag["skillsCount"]), "WSL"]
+                    rt = _route_text(wag)
+                    if rt:
+                        sub_parts.append(rt)
+                    _add_sidebar_row(qid, qid, f"✓ {wag['name']}", " · ".join(sub_parts), wag)
+                else:
+                    tag_lbl = "未知只读" if wag.get("discovered") else ("疑似残留" if id_state == "residual" else "仅配置")
+                    residual_items.append((qid, qid, wag, f"? {wag['name']} ({t_info['name']}·{tag_lbl})"))
 
-        footer = tk.Label(self.sidebar, text=f"数据目录\n{paths.DATA_DIR}", font=(FONT, 8),
-                          justify="left", anchor="w", wraplength=200)
-        footer.pack(side="bottom", fill="x", padx=18, pady=14)
-        self._theme(footer, bg="sidebar", fg="muted")
+        if residual_items:
+            arrow = "▾" if getattr(self, "_show_residual", False) else "▸"
+            res_head = tk.Label(
+                sb_inner, text=f"{arrow} 配置残留与未知（{len(residual_items)}）",
+                font=(FONT, 8, "bold"), anchor="w", cursor="hand2",
+            )
+            res_head.pack(fill="x", padx=14, pady=(12, 2))
+            self._theme(res_head, bg="sidebar", fg="warn")
+            res_head.bind("<Button-1>", lambda _e: self._toggle_residual_section())
+            res_head.bind("<MouseWheel>", _scroll_sidebar)
+            if getattr(self, "_show_residual", False):
+                for sid, qid, meta, label in residual_items:
+                    mc = "-" if meta.get("mcpCount") is None else str(meta.get("mcpCount"))
+                    sk = meta.get("effectiveSkillsCount", meta.get("skillsCount", 0))
+                    _add_sidebar_row(sid, qid, label, f"{mc} MCP · {sk} Skill", meta)
 
     def _build_log(self) -> None:
         self.log_card = tk.Frame(self.content)
-        self.log_card.pack(fill="x", pady=(10, 0))
+        self.log_card.pack(side="bottom", fill="x", pady=(10, 0))
         self._theme(self.log_card, bg="bg")
 
         head = tk.Frame(self.log_card)
@@ -544,11 +686,23 @@ class App:
         clear = self._button(head, "清空", self.clear_log, "ghost")
         clear.pack(side="right", padx=(0, 6))
 
+        self.log_body = tk.Frame(self.log_card, highlightthickness=1)
+        self.log_body.pack(fill="x", pady=(6, 0))
+        self._theme(self.log_body, bg="surface2")
+        self._themed.append(
+            lambda b=self.log_body: b.winfo_exists() and b.configure(highlightbackground=self.palette()["border"]) is None
+        )
+
         self.log_box = tk.Text(
-            self.log_card, height=4, wrap="word", relief="flat", bd=0, padx=12, pady=8,
+            self.log_body, height=4, wrap="word", relief="flat", bd=0, padx=12, pady=8,
             font=(MONO, 9), state="disabled", highlightthickness=0,
         )
-        self.log_box.pack(fill="x", pady=(6, 0))
+        log_scroll = ttk.Scrollbar(
+            self.log_body, orient="vertical", command=self.log_box.yview, style="App.Vertical.TScrollbar"
+        )
+        self.log_box.configure(yscrollcommand=log_scroll.set)
+        self.log_box.pack(side="left", fill="x", expand=True)
+        log_scroll.pack(side="right", fill="y")
         self._theme(self.log_box, bg="surface2", fg="muted")
 
     def _hover_agent(self, profile_id: str, active: bool) -> None:
@@ -573,6 +727,8 @@ class App:
                 "permission_error": colors["danger"],
                 "read_error": colors["danger"],
                 "plugin_only": colors["plugin"],
+                "unknown_readonly": colors["warn"],
+                "skills_only": colors["plugin"],
             }.get(state, colors["ok"])
             row["row"].configure(bg=background)
             row["col"].configure(bg=background)
@@ -598,13 +754,28 @@ class App:
             style.theme_use("clam")
         except tk.TclError:
             pass
+        try:
+            style.layout("App.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
+            style.layout(
+                "App.Vertical.TScrollbar",
+                [(
+                    "Vertical.Scrollbar.trough",
+                    {
+                        "children": [("Vertical.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"})],
+                        "sticky": "ns",
+                    },
+                )],
+            )
+        except tk.TclError:
+            pass
         style.configure(
             "App.Treeview",
             background=colors["surface"],
             fieldbackground=colors["surface"],
             foreground=colors["text"],
             borderwidth=0,
-            rowheight=31,
+            relief="flat",
+            rowheight=34,
             font=(FONT, 9),
         )
         style.map(
@@ -617,15 +788,26 @@ class App:
             background=colors["surface2"],
             foreground=colors["muted"],
             relief="flat",
+            borderwidth=0,
             font=(FONT, 9, "bold"),
-            padding=(8, 8),
+            padding=(10, 9),
         )
-        style.map("App.Treeview.Heading", background=[("active", colors["surface2"])])
+        style.map("App.Treeview.Heading", background=[("active", colors["border"])])
         style.configure("App.Horizontal.TProgressbar", troughcolor=colors["surface2"], background=colors["accent"],
-                        borderwidth=0, thickness=6)
+                        borderwidth=0, thickness=5)
         style.configure("App.TPanedwindow", background=colors["bg"], sashwidth=8, sashrelief="flat")
-        style.configure("App.Vertical.TScrollbar", background=colors["border"], troughcolor=colors["surface"],
-                        bordercolor=colors["surface"], arrowcolor=colors["muted"])
+        style.configure(
+            "App.Vertical.TScrollbar",
+            background=colors["border"],
+            troughcolor=colors["surface"],
+            bordercolor=colors["surface"],
+            lightcolor=colors["border"],
+            darkcolor=colors["border"],
+            borderwidth=0,
+            gripcount=0,
+            width=8,
+        )
+        style.map("App.Vertical.TScrollbar", background=[("active", colors["muted"])])
 
         self._prune_themed()
         for button, kind in self._buttons:
@@ -662,12 +844,16 @@ class App:
             schema=wag["schema"],
             command="array" if wag["agent"] == "opencode" else "string",
             env="environment" if wag["agent"] == "opencode" else "env",
+            readonly=bool(wag.get("readonly", False)),
         )
 
     def current(self):
         wsl_agents = getattr(self, "_wsl_agents", {})
         if self.agent_id in wsl_agents:
             return self._wsl_profile(wsl_agents[self.agent_id])
+        disc_win = getattr(self, "_discovered_win_agents", {})
+        if self.agent_id in disc_win:
+            return self._wsl_profile(disc_win[self.agent_id])
         if self.agent_id is None or self.agent_id not in self.profiles:
             raise RuntimeError("本机尚未检测到可用的 Agent 配置。请先安装 Agent 或创建其配置文件。")
         return self.profiles[self.agent_id]
@@ -681,13 +867,25 @@ class App:
                 parent=self.root,
             )
             return None
+        disc_win = getattr(self, "_discovered_win_agents", {})
+        if self.agent_id in disc_win:
+            messagebox.showinfo(
+                "未知 Agent（只读）",
+                "该 Agent 为自动发现的未知配置，默认仅支持只读查看与诊断；如需写入管理，请先为其添加内置或本地 profile。",
+                parent=self.root,
+            )
+            return None
         if self.agent_id is None or self.agent_id not in self.profiles:
             messagebox.showinfo("未检测到 Agent", "当前没有选中的 Agent。", parent=self.root)
             return None
         return self.profiles[self.agent_id]
 
     def select_agent(self, profile_id: str) -> None:
-        if profile_id not in self.detected and profile_id not in self._wsl_agents:
+        if (
+            profile_id not in self.detected
+            and profile_id not in self._wsl_agents
+            and profile_id not in getattr(self, "_discovered_win_agents", {})
+        ):
             return
         self.agent_id = profile_id
         self.selected_target = self._wsl_agents[profile_id]["target"] if profile_id in self._wsl_agents else "windows"
@@ -695,21 +893,130 @@ class App:
         self.refresh_servers()
         self._save_settings()
 
-    def refresh_agents(self) -> None:
+    def _toggle_residual_section(self) -> None:
+        self._show_residual = not getattr(self, "_show_residual", False)
+        if hasattr(self, "sidebar") and self.sidebar.winfo_exists():
+            self.sidebar.destroy()
+        self._prune_themed()
+        self._sidebar_rows.clear()
+        self._agent_meta.clear()
+        self._build_sidebar()
+        self._paint_agent_rows()
+
+    def _on_agent_context(self, event, qualified_id: str, select_id: str) -> None:
+        self.select_agent(select_id)
+        menu = tk.Menu(self.root, tearoff=0)
+        colors = self.palette()
+        menu.configure(
+            bg=colors["surface"], fg=colors["text"], activebackground=colors["accent"],
+            activeforeground="#ffffff", bd=0,
+        )
+
+        def _set_override(state: str, msg: str) -> None:
+            targets.set_agent_identity_override(qualified_id, state)
+            self.log(f"{qualified_id}：{msg}")
+            self.refresh_all()
+
+        menu.add_command(label="确认这是已安装 Agent", command=lambda: _set_override("confirmed", "已确认为已安装 Agent"))
+        menu.add_command(label="标记为配置残留", command=lambda: _set_override("residual", "已标记为配置残留"))
+        menu.add_command(label="忽略此路径", command=lambda: _set_override("ignored", "已忽略此路径"))
+        menu.add_separator()
+        menu.add_command(label="恢复自动判断", command=lambda: _set_override("auto", "已恢复自动识别"))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _collect_initial_state(self) -> tuple[dict, dict, dict, list, dict, dict]:
         detected = profiles.detected_profiles(self.profiles)
+        win_meta: dict[str, dict] = {}
+        win_skills: dict[str, int] = {}
+        for profile in detected.values():
+            win_meta[profile.id] = profiles.detect_agent(profile)
+            sk_dir = context_audit._skill_dir_for(profile)
+            sk_count, _sk_exists, _sk_link = targets._count_posix_skills(sk_dir) if sk_dir else (0, False, False)
+            win_skills[profile.id] = sk_count
+        all_targets = targets.collect_targets_report()["targets"]
+        wsl_targets = [item for item in all_targets if item["kind"] == "wsl"]
+        win_target = next((item for item in all_targets if item["kind"] == "windows"), None)
+        win_agents_all = win_target.get("agents", []) if win_target else []
+        disc_win = {item["qualifiedId"]: item for item in win_agents_all if item.get("discovered")}
+        win_target_agents = {item["agent"]: item for item in win_agents_all if not item.get("discovered")}
+        return detected, win_meta, win_skills, wsl_targets, disc_win, win_target_agents
+
+    def _apply_initial_state(self, payload, log_msg: str = "就绪。选择左侧 Agent 查看其 MCP。") -> None:
+        detected, win_meta, win_skills, wsl_targets, disc_win, win_target_agents = payload
+        self._initial_loading = False
         self.detected = detected
-        self._wsl_targets = [
-            item for item in targets.collect_targets_report()["targets"]
-            if item["kind"] == "wsl"
-        ]
+        self._precomputed_win_meta = win_meta
+        self._precomputed_win_skills = win_skills
+        self._wsl_targets = wsl_targets
+        self._discovered_win_agents = disc_win
+        self._win_target_agents = win_target_agents
         self._wsl_agents = {
             wag["qualifiedId"]: wag
             for t_item in self._wsl_targets
             for wag in t_item.get("agents", [])
         }
-        if self.agent_id not in self.detected and self.agent_id not in self._wsl_agents:
+        if (
+            self.agent_id not in self.detected
+            and self.agent_id not in self._wsl_agents
+            and self.agent_id not in self._discovered_win_agents
+        ):
             self.agent_id = "trae" if "trae" in self.detected else (
-                next(iter(self.detected), None) or next(iter(self._wsl_agents), None)
+                next(iter(self.detected), None)
+                or next(iter(self._discovered_win_agents), None)
+                or next(iter(self._wsl_agents), None)
+            )
+        self.selected_target = (
+            self._wsl_agents[self.agent_id]["target"]
+            if self.agent_id in self._wsl_agents
+            else "windows"
+        )
+        if hasattr(self, "sidebar") and self.sidebar.winfo_exists():
+            self.sidebar.destroy()
+        self._prune_themed()
+        self._sidebar_rows.clear()
+        self._agent_meta.clear()
+        self._build_sidebar()
+        self._paint_agent_rows()
+        self.refresh_servers()
+        self.set_status("就绪（只读模式）" if paths.read_only() else "就绪")
+        if self.details.get("1.0", "end").strip() == "正在检测本机 Agent 和运行目标…":
+            self._set_details("在左侧选择 Agent，再选择一条 MCP 查看详情。")
+        if log_msg:
+            self.log(log_msg)
+
+    def _initial_refresh(self) -> None:
+        self.run_task(
+            "启动中：正在检测 Windows 与 WSL Agent…",
+            self._collect_initial_state,
+            lambda payload: self._apply_initial_state(payload, "就绪。选择左侧 Agent 查看其 MCP。"),
+        )
+
+    def refresh_agents(self) -> None:
+        detected, win_meta, win_skills, wsl_targets, disc_win, win_target_agents = self._collect_initial_state()
+        self._initial_loading = False
+        self.detected = detected
+        self._precomputed_win_meta = win_meta
+        self._precomputed_win_skills = win_skills
+        self._wsl_targets = wsl_targets
+        self._discovered_win_agents = disc_win
+        self._win_target_agents = win_target_agents
+        self._wsl_agents = {
+            wag["qualifiedId"]: wag
+            for t_item in self._wsl_targets
+            for wag in t_item.get("agents", [])
+        }
+        if (
+            self.agent_id not in self.detected
+            and self.agent_id not in self._wsl_agents
+            and self.agent_id not in self._discovered_win_agents
+        ):
+            self.agent_id = "trae" if "trae" in self.detected else (
+                next(iter(self.detected), None)
+                or next(iter(self._discovered_win_agents), None)
+                or next(iter(self._wsl_agents), None)
             )
         self.selected_target = (
             self._wsl_agents[self.agent_id]["target"]
@@ -725,9 +1032,11 @@ class App:
         self._paint_agent_rows()
 
     def refresh_all(self) -> None:
-        self.refresh_agents()
-        self.refresh_servers()
-        self.log("已刷新。")
+        self.run_task(
+            "刷新中：正在重新扫描 Agent、WSL 和 Skills 状态…",
+            self._collect_initial_state,
+            lambda payload: self._apply_initial_state(payload, "已刷新。"),
+        )
 
     # ------------------------------------------------------------------ table
     @staticmethod
@@ -744,33 +1053,33 @@ class App:
         self.rows.clear()
 
         wsl_agents = getattr(self, "_wsl_agents", {})
-        if self.agent_id in wsl_agents:
-            wag = wsl_agents[self.agent_id]
-            unc_cfg = Path(wag["uncConfigPath"])
-            fake_prof = profiles.Profile(
-                id=wag["agent"], name=wag["name"], config=wag["configPath"],
-                format=wag["format"], schema=wag["schema"],
-                command="array" if wag["agent"] == "opencode" else "string",
-                env="environment" if wag["agent"] == "opencode" else "env",
-            )
+        disc_win = getattr(self, "_discovered_win_agents", {})
+        if self.agent_id in wsl_agents or self.agent_id in disc_win:
+            wag = wsl_agents[self.agent_id] if self.agent_id in wsl_agents else disc_win[self.agent_id]
+            unc_cfg = Path(wag.get("uncConfigPath") or wag.get("configPath") or "")
+            fake_prof = self._wsl_profile(wag)
             section = {}
-            if unc_cfg.is_file():
+            if wag.get("configPath") and unc_cfg.is_file():
                 try:
                     section = formats.read_section(unc_cfg, wag["format"], wag["schema"])
                 except Exception as exc:
-                    self.hint.configure(text=f"WSL 配置解析失败：{exc}", fg=self.palette()["danger"])
+                    self.hint.configure(text=f"配置解析失败：{exc}", fg=self.palette()["danger"])
+            is_wsl = wag.get("transport") == "wsl"
             for index, (srv_name, spec) in enumerate(section.items()):
                 if not isinstance(spec, dict) or adapters.is_container(spec):
                     continue
                 src_cat = adapters.source_category(spec, fake_prof)
                 src_lbl = adapters.SOURCE_CATEGORY_LABELS.get(src_cat, "未知")
                 url = adapters.url_of(spec, fake_prof)
-                state = "WSL 远程" if url else "WSL 本地"
+                if is_wsl:
+                    state = "WSL 远程" if url else "WSL 本地"
+                else:
+                    state = "未知只读(远程)" if url else "未知只读(本地)"
                 self.rows[srv_name] = {
                     "name": srv_name, "spec": spec, "live": spec, "state": state, "tag": "plugin",
-                    "version": "", "kind": "remote-http" if url else "wsl-stdio", "level": "manageable",
-                    "here": True, "source": wag["configPath"], "sourceCategory": src_cat,
-                    "sourceLabel": src_lbl, "conflict": "", "aux": False,
+                    "version": "", "kind": "remote-http" if url else ("wsl-stdio" if is_wsl else "local-stdio"),
+                    "level": "manageable", "here": True, "source": wag["configPath"],
+                    "sourceCategory": src_cat, "sourceLabel": src_lbl, "conflict": "", "aux": False,
                 }
                 self.tree.insert(
                     "", "end", iid=srv_name,
@@ -778,7 +1087,8 @@ class App:
                     tags=("plugin", "odd" if index % 2 else "even"),
                 )
             self.hint.configure(
-                text=f"{wag['target']} / {wag['name']}  ·  {wag['configPath']}  ·  {len(self.rows)} MCP · {wag['skillsCount']} Skills",
+                text=f"{wag['target']} / {wag['name']}  ·  {wag['configPath'] or wag['skillsPath']}  ·  "
+                     f"{len(self.rows)} MCP · {wag['skillsCount']} Skills（只读）",
                 fg=self.palette()["muted"],
             )
             self.status_right.configure(text=f"{wag['qualifiedId']} · {len(self.rows)} 项")
@@ -2296,6 +2606,490 @@ class App:
             side="right", padx=16, pady=(4, 12))
         self.log("上下文与 Skill 审计完成。")
 
+    # --------------------------------------------------------- skills manager
+    def open_skills_manager(self) -> None:
+        self.run_task(
+            "正在加载运行目标与 Skills 状态…",
+            lambda: targets.collect_targets_report(),
+            self._show_skills_manager,
+        )
+
+    def _show_skills_manager(self, report: dict) -> None:
+        colors = self.palette()
+        window = tk.Toplevel(self.root)
+        window.title("Skills 管理")
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        w = max(780, min(1040, sw - 60))
+        h = max(500, min(660, sh - 100))
+        window.geometry(f"{w}x{h}")
+        window.minsize(780, 500)
+        window.configure(bg=colors["bg"])
+
+        tk.Label(
+            window, text="Skills 跨 Agent 安全同步管理", bg=colors["bg"], fg=colors["text"],
+            font=(FONT, 12, "bold"),
+        ).pack(anchor="w", padx=16, pady=(14, 2))
+        tk.Label(
+            window,
+            text="按运行目标隔离管理 Skills，支持逐项勾选、差异预览、冲突保护、备份与回滚。",
+            bg=colors["bg"], fg=colors["muted"], font=(FONT, 9),
+        ).pack(anchor="w", padx=16, pady=(0, 8))
+
+        controls = tk.Frame(window, bg=colors["bg"])
+        controls.pack(fill="x", padx=16, pady=(0, 6))
+
+        target_items = report.get("targets") or [{"id": "windows", "name": "Windows 本机", "online": True}]
+        target_ids = [item["id"] for item in target_items]
+        default_target = self.selected_target if self.selected_target in target_ids else target_ids[0]
+
+        mode_labels = {
+            "逐项软链接 (symlink-per-entry)": "symlink-per-entry",
+            "共享目录 (shared-directory)": "shared-directory",
+            "独立复制 (copy)": "copy",
+        }
+        mode_display = {v: k for k, v in mode_labels.items()}
+
+        target_var = tk.StringVar(value=default_target)
+        source_var = tk.StringVar()
+        dest_var = tk.StringVar()
+        mode_var = tk.StringVar(value=mode_display["symlink-per-entry"])
+        recommended_var = tk.BooleanVar(value=False)
+        replace_var = tk.BooleanVar(value=False)
+
+        tk.Label(controls, text="运行目标", bg=colors["bg"], fg=colors["muted"], font=(FONT, 9)).grid(
+            row=0, column=0, sticky="w", padx=(0, 6), pady=3)
+        target_cb = ttk.Combobox(controls, textvariable=target_var, values=target_ids, state="readonly", width=22)
+        target_cb.grid(row=0, column=1, sticky="w", padx=(0, 14), pady=3)
+
+        tk.Label(controls, text="源 Agent", bg=colors["bg"], fg=colors["muted"], font=(FONT, 9)).grid(
+            row=0, column=2, sticky="w", padx=(0, 6), pady=3)
+        source_cb = ttk.Combobox(controls, textvariable=source_var, state="readonly", width=18)
+        source_cb.grid(row=0, column=3, sticky="w", padx=(0, 14), pady=3)
+
+        tk.Label(controls, text="目标 Agent", bg=colors["bg"], fg=colors["muted"], font=(FONT, 9)).grid(
+            row=0, column=4, sticky="w", padx=(0, 6), pady=3)
+        dest_cb = ttk.Combobox(controls, textvariable=dest_var, state="readonly", width=18)
+        dest_cb.grid(row=0, column=5, sticky="w", padx=(0, 14), pady=3)
+
+        tk.Label(controls, text="同步模式", bg=colors["bg"], fg=colors["muted"], font=(FONT, 9)).grid(
+            row=1, column=0, sticky="w", padx=(0, 6), pady=3)
+        mode_cb = ttk.Combobox(
+            controls, textvariable=mode_var, values=list(mode_labels.keys()), state="readonly", width=28
+        )
+        mode_cb.grid(row=1, column=1, columnspan=2, sticky="w", padx=(0, 14), pady=3)
+
+        opts = tk.Frame(controls, bg=colors["bg"])
+        opts.grid(row=1, column=3, columnspan=3, sticky="w", pady=3)
+        rec_check = tk.Checkbutton(
+            opts, text="仅推荐 Skill 集合", variable=recommended_var, bg=colors["bg"], fg=colors["text"],
+            selectcolor=colors["surface"], activebackground=colors["bg"], activeforeground=colors["text"],
+            font=(FONT, 9),
+        )
+        rec_check.pack(side="left", padx=(0, 12))
+        tk.Checkbutton(
+            opts, text="允许替换非空目录 (--replace)", variable=replace_var, bg=colors["bg"], fg=colors["text"],
+            selectcolor=colors["surface"], activebackground=colors["bg"], activeforeground=colors["text"],
+            font=(FONT, 9),
+        ).pack(side="left")
+
+        summary_label = tk.Label(window, text="", bg=colors["bg"], fg=colors["muted"], font=(FONT, 9), anchor="w")
+        summary_label.pack(fill="x", padx=16, pady=(2, 6))
+
+        sel_bar = tk.Frame(window, bg=colors["bg"])
+        sel_bar.pack(fill="x", padx=16, pady=(0, 6))
+        sel_hint = tk.Label(
+            sel_bar, text="双击或按空格切换勾选 Skill（系统目录与目标独有项自动保留）：",
+            bg=colors["bg"], fg=colors["muted"], font=(FONT, 8),
+        )
+        sel_hint.pack(side="left")
+
+        actions = tk.Frame(window, bg=colors["bg"])
+        actions.pack(side="bottom", fill="x", padx=16, pady=(8, 14))
+
+        frame = tk.Frame(window, bg=colors["bg"])
+        frame.pack(fill="both", expand=True, padx=16)
+        columns = ("选择", "Skill", "源状态", "目标状态", "操作", "说明")
+        table = ttk.Treeview(frame, columns=columns, show="headings", style="App.Treeview")
+        for column, width in zip(columns, (55, 190, 95, 130, 85, 420)):
+            table.heading(column, text=column, anchor="w")
+            table.column(column, width=width, anchor="w", stretch=(column == "说明"))
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=table.yview, style="App.Vertical.TScrollbar")
+        table.configure(yscrollcommand=scroll.set)
+        table.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self._style_table(table)
+
+        state: dict[str, object] = {
+            "agents": [],
+            "agent_map": {},
+            "selected": set(),
+            "selectable": set(),
+            "plan": None,
+        }
+
+        def _selected_mode() -> str:
+            return mode_labels.get(mode_var.get(), "symlink-per-entry")
+
+        def _render_rows(plan: dict | None) -> None:
+            for item in table.get_children():
+                table.delete(item)
+            agent_map: dict[str, dict] = state["agent_map"]  # type: ignore[assignment]
+            src_info = agent_map.get(source_var.get(), {})
+            dst_info = agent_map.get(dest_var.get(), {})
+            src_entries = list(src_info.get("entries", []))
+            dst_entries = list(dst_info.get("entries", []))
+            selected: set[str] = state["selected"]  # type: ignore[assignment]
+
+            if plan is None:
+                rows = []
+                for name in src_entries:
+                    rows.append({
+                        "skill": name,
+                        "sourceState": "已存在",
+                        "destState": "已存在" if name in dst_entries else "未配置",
+                        "action": "待规划",
+                        "tag": "registered",
+                        "note": "点击“生成计划”查看变更详情",
+                        "selectable": "1",
+                    })
+                for name in dst_info.get("systemEntries", []):
+                    rows.append({
+                        "skill": name,
+                        "sourceState": "系统目录",
+                        "destState": "保留",
+                        "action": "不处理",
+                        "tag": "plugin",
+                        "note": "系统目录（自动保留）",
+                        "selectable": "0",
+                    })
+            else:
+                rows = skills.summarize_skills_plan_rows(plan, src_entries, dst_entries)
+
+            is_shared_mode = _selected_mode() == "shared-directory"
+            state["selectable"] = set() if is_shared_mode else {
+                r["skill"] for r in rows if r.get("selectable") == "1"
+            }
+            for btn in sel_buttons:
+                btn.configure(state="disabled" if is_shared_mode else "normal")
+            rec_check.configure(state="disabled" if is_shared_mode else "normal")
+            sel_hint.configure(
+                text=(
+                    "共享目录模式会链接整个源目录，不支持逐项筛选（如需部分同步请切换为「逐项软链接」或「独立复制」）。"
+                    if is_shared_mode
+                    else "双击或按空格切换勾选 Skill（系统目录与目标独有项自动保留）："
+                )
+            )
+            for row in rows:
+                sk = row["skill"]
+                if row.get("selectable") != "1":
+                    mark = "-"
+                elif is_shared_mode:
+                    mark = "✓"
+                else:
+                    mark = "✓" if sk in selected else "·"
+                table.insert(
+                    "", "end", iid=sk,
+                    values=(mark, sk, row["sourceState"], row["destState"], row["action"], row["note"]),
+                    tags=(row["tag"],),
+                )
+
+            if plan is None:
+                summary_label.configure(
+                    text=f"源：{src_info.get('skillsPath', '-')} ({src_info.get('mode', '-')})  ->  "
+                         f"目标：{dst_info.get('skillsPath', '-')} ({dst_info.get('mode', '-')})"
+                )
+            elif plan.get("alreadyShared"):
+                summary_label.configure(text="源目录与目标目录指向同一物理路径（alreadyShared），无需同步。")
+            else:
+                summary_label.configure(
+                    text=f"计划完成：新增 {len(plan.get('added', []))} · 更新 {len(plan.get('updated', []))} · "
+                         f"保留 {len(plan.get('kept', []))} · 冲突 {len(plan.get('conflicts', []))} · "
+                         f"系统保留 {len(plan.get('preserved', []))}"
+                )
+
+        def reload_target(_event=None) -> None:
+            t_id = target_var.get()
+            try:
+                status_data = skills.skills_status(t_id)
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror("加载失败", str(exc), parent=window)
+                return
+            ag_list = [a for a in status_data.get("agents", []) if not a.get("readonly")]
+            state["agents"] = ag_list
+            state["agent_map"] = {a["agent"]: a for a in ag_list}
+            names = [a["agent"] for a in ag_list]
+            source_cb.configure(values=names)
+            dest_cb.configure(values=names)
+            if names:
+                src_default = "pi" if "pi" in names else max(names, key=lambda n: state["agent_map"][n]["count"])
+                if source_var.get() not in names:
+                    source_var.set(src_default)
+                dst_default = "codex" if "codex" in names and source_var.get() != "codex" else (
+                    next((n for n in names if n != source_var.get()), names[0])
+                )
+                if dest_var.get() not in names:
+                    dest_var.set(dst_default)
+            else:
+                source_var.set("")
+                dest_var.set("")
+            reset_selection_from_source()
+
+        def reset_selection_from_source(_event=None) -> None:
+            src_info = state["agent_map"].get(source_var.get(), {})  # type: ignore[union-attr]
+            entries = list(src_info.get("entries", []))
+            if recommended_var.get():
+                rec_set = set(skills.RECOMMENDED_UBUNTU_SKILLS)
+                state["selected"] = {n for n in entries if n in rec_set}
+            else:
+                state["selected"] = set(entries)
+            state["plan"] = None
+            _render_rows(None)
+
+        def toggle_row(_event=None) -> None:
+            if _selected_mode() == "shared-directory":
+                return
+            sel = table.selection()
+            if not sel:
+                return
+            sk = str(sel[0])
+            if sk not in state["selectable"]:  # type: ignore[operator]
+                return
+            selected: set[str] = state["selected"]  # type: ignore[assignment]
+            if sk in selected:
+                selected.remove(sk)
+            else:
+                selected.add(sk)
+            state["plan"] = None
+            _render_rows(None)
+
+        def select_all() -> None:
+            src_info = state["agent_map"].get(source_var.get(), {})  # type: ignore[union-attr]
+            state["selected"] = set(src_info.get("entries", []))
+            recommended_var.set(False)
+            state["plan"] = None
+            _render_rows(None)
+
+        def select_none() -> None:
+            state["selected"] = set()
+            state["plan"] = None
+            _render_rows(None)
+
+        def select_recommended() -> None:
+            recommended_var.set(True)
+            reset_selection_from_source()
+
+        sel_buttons: list[tk.Button] = []
+        for text, cmd in (("全选", select_all), ("全不选", select_none), ("仅选推荐", select_recommended)):
+            btn = tk.Button(
+                sel_bar, text=text, command=cmd, relief="flat", bd=0, padx=8, pady=2,
+                bg=colors["surface"], fg=colors["text"], font=(FONT, 8), cursor="hand2",
+            )
+            btn.pack(side="right", padx=(6, 0))
+            sel_buttons.append(btn)
+
+        def generate_plan() -> dict | None:
+            t_id = target_var.get()
+            src_ag = source_var.get()
+            dst_ag = dest_var.get()
+            if not src_ag or not dst_ag:
+                messagebox.showinfo("提示", "请先选择源 Agent 和目标 Agent。", parent=window)
+                return None
+            mode = _selected_mode()
+            if mode == "shared-directory":
+                include = None
+            else:
+                src_entries = set(state["agent_map"].get(src_ag, {}).get("entries", []))  # type: ignore[union-attr]
+                chosen = sorted(state["selected"] & src_entries)  # type: ignore[operator]
+                include = None if len(chosen) == len(src_entries) else chosen
+            try:
+                plan = skills.plan_skills_sync(
+                    target_id=t_id,
+                    source_agent=src_ag,
+                    dest_agent=dst_ag,
+                    mode=mode,
+                    include=include,
+                    replace=bool(replace_var.get()),
+                )
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror("生成计划失败", str(exc), parent=window)
+                return None
+            state["plan"] = plan
+            _render_rows(plan)
+            return plan
+
+        def preview_diff() -> None:
+            plan = state["plan"] or generate_plan()
+            if not plan:
+                return
+            diff_win = tk.Toplevel(window)
+            diff_win.title(f"Skills 同步差异预览 - {plan['sourceAgent']} -> {plan['destAgent']}")
+            diff_win.geometry("820x520")
+            diff_win.configure(bg=colors["bg"])
+            diff_frame = tk.Frame(diff_win, bg=colors["bg"])
+            diff_frame.pack(fill="both", expand=True, padx=16, pady=(14, 8))
+            box = tk.Text(
+                diff_frame, wrap="word", relief="flat", bd=0, padx=12, pady=10,
+                font=(MONO, 9), bg=colors["surface"], fg=colors["text"], highlightthickness=0,
+            )
+            diff_scroll = ttk.Scrollbar(
+                diff_frame, orient="vertical", command=box.yview, style="App.Vertical.TScrollbar"
+            )
+            box.configure(yscrollcommand=diff_scroll.set)
+            box.pack(side="left", fill="both", expand=True)
+            diff_scroll.pack(side="right", fill="y")
+            diff_text = skills.format_skills_plan_diff(plan)  # type: ignore[arg-type]
+            box.insert("end", diff_text)
+            box.tag_configure("add", foreground=colors["ok"])
+            box.tag_configure("upd", foreground=colors["info"])
+            box.tag_configure("warn", foreground=colors["warn"])
+            for idx, line in enumerate(diff_text.splitlines(), start=1):
+                if line.startswith("+ "):
+                    box.tag_add("add", f"{idx}.0", f"{idx}.end")
+                elif line.startswith("~ "):
+                    box.tag_add("upd", f"{idx}.0", f"{idx}.end")
+                elif line.startswith("! "):
+                    box.tag_add("warn", f"{idx}.0", f"{idx}.end")
+            box.configure(state="disabled")
+            tk.Button(
+                diff_win, text="关闭", command=diff_win.destroy, relief="flat", bd=0, padx=14, pady=6,
+                bg=colors["surface"], fg=colors["text"], font=(FONT, 9), cursor="hand2",
+            ).pack(side="right", padx=16, pady=(0, 12))
+
+        def apply_sync() -> None:
+            if paths.read_only():
+                messagebox.showwarning("只读模式", "当前处于只读模式，不能应用 Skills 同步。", parent=window)
+                return
+            plan = state["plan"] or generate_plan()
+            if not plan:
+                return
+            if plan.get("alreadyShared") or plan.get("alreadySynced"):  # type: ignore[union-attr]
+                messagebox.showinfo("无需同步", "源与目标 Skills 当前已一致。", parent=window)
+                return
+            added_n = len(plan.get("added", []))  # type: ignore[union-attr]
+            upd_n = len(plan.get("updated", []))  # type: ignore[union-attr]
+            conf_n = len(plan.get("conflicts", []))  # type: ignore[union-attr]
+            if not messagebox.askyesno(
+                "确认应用 Skills 同步",
+                f"目标：{plan['target']} / {plan['destAgent']}\n"  # type: ignore[index]
+                f"模式：{plan['mode']}\n"  # type: ignore[index]
+                f"变更：新增 {added_n} 项 · 更新 {upd_n} 项 · 冲突跳过 {conf_n} 项\n\n"
+                "应用前会自动备份目标 Skills 目录。继续吗？",
+                parent=window,
+            ):
+                return
+            try:
+                res = skills.apply_skills_sync(plan)  # type: ignore[arg-type]
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror("应用同步失败", str(exc), parent=window)
+                return
+            self.log(
+                f"Skills 同步完成（{plan['target']}/{plan['destAgent']}）："  # type: ignore[index]
+                f"新增 {len(res['added'])} 项，更新 {len(res['updated'])} 项，备份：{res['backup'] or '无'}"
+            )
+            messagebox.showinfo(
+                "同步完成",
+                f"已完成同步：新增 {len(res['added'])} 项，更新 {len(res['updated'])} 项。\n"
+                f"备份：{res['backup'] or '新建目录，无需备份'}",
+                parent=window,
+            )
+            reload_target()
+            self.refresh_all()
+
+        def view_backups() -> None:
+            bak_win = tk.Toplevel(window)
+            bak_win.title("Skills 备份与审计记录")
+            bak_win.geometry("820x460")
+            bak_win.configure(bg=colors["bg"])
+            frame_b = tk.Frame(bak_win, bg=colors["bg"])
+            frame_b.pack(fill="both", expand=True, padx=16, pady=(14, 8))
+            cols_b = ("时间", "目标", "Agent", "模式", "备份路径")
+            tbl_b = ttk.Treeview(frame_b, columns=cols_b, show="headings", style="App.Treeview")
+            for col, w in zip(cols_b, (150, 130, 100, 140, 260)):
+                tbl_b.heading(col, text=col, anchor="w")
+                tbl_b.column(col, width=w, anchor="w", stretch=(col == "备份路径"))
+            scroll_b = ttk.Scrollbar(
+                frame_b, orient="vertical", command=tbl_b.yview, style="App.Vertical.TScrollbar"
+            )
+            tbl_b.configure(yscrollcommand=scroll_b.set)
+            tbl_b.pack(side="left", fill="both", expand=True)
+            scroll_b.pack(side="right", fill="y")
+            for item in reversed(provenance.load_audit(limit=50)):
+                if str(item.get("mode", "")).startswith("skills:"):
+                    tbl_b.insert(
+                        "", "end",
+                        values=(
+                            item.get("timestamp", ""),
+                            item.get("targetEnv", "windows"),
+                            item.get("agent", ""),
+                            item.get("mode", ""),
+                            item.get("backupPath") or "无",
+                        ),
+                    )
+            acts_b = tk.Frame(bak_win, bg=colors["bg"])
+            acts_b.pack(fill="x", padx=16, pady=(0, 12))
+            tk.Button(
+                acts_b, text="打开备份目录", command=lambda: self._open(paths.BACKUP_DIR),
+                relief="flat", bd=0, padx=12, pady=6, bg=colors["surface"], fg=colors["text"],
+                font=(FONT, 9), cursor="hand2",
+            ).pack(side="left")
+            tk.Button(
+                acts_b, text="关闭", command=bak_win.destroy,
+                relief="flat", bd=0, padx=14, pady=6, bg=colors["surface"], fg=colors["text"],
+                font=(FONT, 9), cursor="hand2",
+            ).pack(side="right")
+
+        def rollback_last() -> None:
+            if paths.read_only():
+                messagebox.showwarning("只读模式", "当前处于只读模式，不能执行回滚。", parent=window)
+                return
+            t_id = target_var.get()
+            dst_ag = dest_var.get()
+            if not dst_ag:
+                return
+            if not messagebox.askyesno(
+                "确认回滚", f"将 {t_id} / {dst_ag} 回滚到最近一次审计记录中的备份。继续吗？", parent=window
+            ):
+                return
+            try:
+                used, safety = sync.rollback_from_audit(t_id, dst_ag)
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror("回滚失败", str(exc), parent=window)
+                return
+            self.log(f"已回滚 {t_id}/{dst_ag} 到：{used}（安全备份：{safety or '无'}）")
+            messagebox.showinfo("回滚完成", f"已恢复到：\n{used}\n\n当前状态安全备份：\n{safety or '无'}", parent=window)
+            reload_target()
+            self.refresh_all()
+
+        table.bind("<Double-1>", toggle_row)
+        table.bind("<space>", toggle_row)
+        target_cb.bind("<<ComboboxSelected>>", reload_target)
+        source_cb.bind("<<ComboboxSelected>>", reset_selection_from_source)
+        dest_cb.bind("<<ComboboxSelected>>", lambda _e: _render_rows(None))
+        mode_cb.bind("<<ComboboxSelected>>", lambda _e: _render_rows(None))
+
+        for text, cmd, kind in (
+            ("生成计划", generate_plan, "accent"),
+            ("预览差异", preview_diff, "ghost"),
+            ("应用同步", apply_sync, "ghost"),
+            ("查看备份", view_backups, "ghost"),
+            ("回滚最近一次", rollback_last, "ghost"),
+            ("刷新状态", reload_target, "ghost"),
+        ):
+            bg = colors["accent"] if kind == "accent" else colors["surface"]
+            fg = "#ffffff" if kind == "accent" else colors["text"]
+            abg = colors["accent_hover"] if kind == "accent" else colors["surface2"]
+            tk.Button(
+                actions, text=text, command=cmd, relief="flat", bd=0, padx=12, pady=7,
+                bg=bg, fg=fg, activebackground=abg, activeforeground=fg, font=(FONT, 9), cursor="hand2",
+            ).pack(side="left", padx=(0, 8))
+        tk.Button(
+            actions, text="关闭", command=window.destroy, relief="flat", bd=0, padx=14, pady=7,
+            bg=colors["surface"], fg=colors["text"], font=(FONT, 9), cursor="hand2",
+        ).pack(side="right")
+
+        reload_target()
+
     # ------------------------------------------------------------------- scan
     def scan_all(self) -> None:
         def work():
@@ -2402,7 +3196,7 @@ class App:
             self.progress.stop()
             self.progress.pack_forget()
             self.busy = False
-            self.set_status("就绪")
+            self.set_status("就绪（只读模式）" if paths.read_only() else "就绪")
             if status == "error":
                 self.log(f"任务失败：{payload}")
                 messagebox.showerror("任务失败", str(payload), parent=self.root)
@@ -2425,11 +3219,11 @@ class App:
         self.log_box.configure(state="disabled")
 
     def _toggle_log(self) -> None:
-        if self.log_box.winfo_manager():
-            self.log_box.pack_forget()
+        if self.log_body.winfo_manager():
+            self.log_body.pack_forget()
             self.log_toggle_button.configure(text="展开")
         else:
-            self.log_box.pack(fill="x", pady=(6, 0))
+            self.log_body.pack(fill="x", pady=(6, 0))
             self.log_toggle_button.configure(text="收起")
 
     def _open(self, target: Path) -> None:
@@ -2460,6 +3254,7 @@ class App:
             "Ctrl+B        备份全部配置\n"
             "Ctrl+D        诊断当前 Agent\n"
             "Ctrl+K        上下文与 Skill 审计\n"
+            "Ctrl+S        Skills 管理\n"
             "Esc           清空搜索\n"
             "双击          打开 Agent 配置\n"
             "右键          更多操作",
@@ -2485,6 +3280,7 @@ class App:
         self.root.bind("<Control-b>", lambda _event: self.backup_all())
         self.root.bind("<Control-d>", lambda _event: self.diagnose_current())
         self.root.bind("<Control-k>", lambda _event: self.open_context_audit())
+        self.root.bind("<Control-s>", lambda _event: self.open_skills_manager())
         self.root.bind("<Escape>", lambda _event: self.search_var.set(""))
 
     def _report_exception(self, exc_type, exc_value, exc_tb) -> None:

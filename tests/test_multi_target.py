@@ -46,6 +46,8 @@ class MultiTargetTests(unittest.TestCase):
         )
 
         def fake_unc(_distro: str, posix_path: str) -> Path:
+            if posix_path == "/home/alice":
+                return wsl_home
             rel = posix_path.removeprefix("/home/alice/")
             return wsl_home.joinpath(*rel.split("/")) if rel else wsl_home
 
@@ -61,6 +63,182 @@ class MultiTargetTests(unittest.TestCase):
                 "wsl:Ubuntu-24.04/antigravity",
             },
         )
+
+    def test_detect_unknown_wsl_agent_and_ignores_caches_and_backups(self):
+        wsl_home = self.tmp / "wsl_home_unknown" / "alice"
+        (wsl_home / ".some-agent" / "skills" / "s1").mkdir(parents=True)
+        (wsl_home / ".some-agent" / "mcp.json").write_text(
+            '{"mcpServers": {"demo": {"command": "node"}}}\n', encoding="utf-8"
+        )
+        # Should be ignored: cache / backup / marketplace / non-MCP dir
+        (wsl_home / ".cache" / "mcp.json").parent.mkdir(parents=True)
+        (wsl_home / ".cache" / "mcp.json").write_text('{"mcpServers": {"x": {"command": "x"}}}\n', encoding="utf-8")
+        (wsl_home / ".backups-test").mkdir(parents=True)
+        (wsl_home / ".some-agent" / "mcp.json.bak").write_text('{"mcpServers": {}}\n', encoding="utf-8")
+
+        fake_wsl = targets.Target(
+            id="wsl:Ubuntu-24.04",
+            name="WSL Ubuntu-24.04",
+            kind="wsl",
+            online=True,
+            os_name="Linux",
+            user="alice",
+            home="/home/alice",
+            distro="Ubuntu-24.04",
+        )
+
+        def fake_unc(_distro: str, posix_path: str) -> Path:
+            if posix_path == "/home/alice":
+                return wsl_home
+            rel = posix_path.removeprefix("/home/alice/")
+            return wsl_home.joinpath(*rel.split("/")) if rel else wsl_home
+
+        with mock.patch.object(targets, "wsl_unc_path", side_effect=fake_unc):
+            agents = targets.detect_target_agents(fake_wsl)
+
+        self.assertEqual(len(agents), 1)
+        unknown = agents[0]
+        self.assertTrue(unknown["agent"].startswith("discovered-"))
+        self.assertTrue(unknown["readonly"])
+        self.assertTrue(unknown["discovered"])
+        self.assertEqual(unknown["mcpCount"], 1)
+        self.assertEqual(unknown["skillsCount"], 1)
+        self.assertEqual(unknown["configState"], "unknown_readonly")
+
+    def test_readonly_unknown_agent_blocked_from_skills_and_mcp_sync(self):
+        wsl_home = self.tmp / "wsl_home_ro" / "alice"
+        (wsl_home / ".pi" / "agent" / "skills" / "s1").mkdir(parents=True)
+        (wsl_home / ".pi" / "agent" / "skills" / "s1" / "SKILL.md").write_text("# s1", encoding="utf-8")
+        (wsl_home / ".pi" / "agent" / "mcp.json").write_text('{"mcpServers": {}}\n', encoding="utf-8")
+        (wsl_home / ".custom-agent" / "skills" / "s2").mkdir(parents=True)
+        (wsl_home / ".custom-agent" / "mcp.json").write_text('{"mcpServers": {}}\n', encoding="utf-8")
+
+        fake_wsl = targets.Target(
+            id="wsl:Ubuntu-24.04",
+            name="WSL Ubuntu-24.04",
+            kind="wsl",
+            online=True,
+            os_name="Linux",
+            user="alice",
+            home="/home/alice",
+            distro="Ubuntu-24.04",
+        )
+
+        def fake_unc(_distro: str, posix_path: str) -> Path:
+            if posix_path == "/home/alice":
+                return wsl_home
+            rel = posix_path.removeprefix("/home/alice/")
+            return wsl_home.joinpath(*rel.split("/")) if rel else wsl_home
+
+        with mock.patch.object(targets, "wsl_unc_path", side_effect=fake_unc), \
+             mock.patch.object(targets, "resolve_target", return_value=fake_wsl):
+            agents = targets.detect_target_agents(fake_wsl)
+            unknown_id = next(a["agent"] for a in agents if a.get("discovered"))
+            with self.assertRaises(ValueError):
+                skills.plan_skills_sync("wsl:Ubuntu-24.04", "pi", unknown_id, mode="copy")
+            with self.assertRaises(ValueError):
+                skills.plan_skills_sync("wsl:Ubuntu-24.04", unknown_id, "pi", mode="copy")
+            with self.assertRaises(ValueError):
+                sync.build_target_candidate("wsl:Ubuntu-24.04", unknown_id, {"servers": {}})
+
+    def test_windows_unknown_agent_auto_discovered_and_ignores_backups(self):
+        win_home = self.tmp / "win_home"
+        appdata = self.tmp / "appdata"
+        localappdata = self.tmp / "localappdata"
+        (win_home / ".mystery-agent" / "skills" / "k1").mkdir(parents=True)
+        (win_home / ".mystery-agent" / "mcp.json").write_text(
+            '{"mcpServers": {"m1": {"command": "node"}}}\n', encoding="utf-8"
+        )
+        (appdata / "OtherAgent").mkdir(parents=True)
+        (appdata / "OtherAgent" / "mcp_config.json").write_text(
+            '{"servers": {"m2": {"command": "python"}}}\n', encoding="utf-8"
+        )
+        # Ignored folders
+        (appdata / "backups" / "mcp.json").parent.mkdir(parents=True)
+        (appdata / "backups" / "mcp.json").write_text('{"mcpServers": {}}\n', encoding="utf-8")
+
+        fake_win = targets.Target(
+            id="windows", name="Windows 本机", kind="windows", online=True,
+            os_name="Windows", user="u", home=str(win_home),
+        )
+        with mock.patch.dict(os.environ, {"APPDATA": str(appdata), "LOCALAPPDATA": str(localappdata)}):
+            disc = targets._discover_unknown_windows_agents(fake_win, set(), set())
+
+        names = {d["name"] for d in disc}
+        self.assertIn("未知 Agent (mystery-agent)", names)
+        self.assertIn("未知 Agent (OtherAgent)", names)
+        self.assertTrue(all(d["readonly"] and d["discovered"] for d in disc))
+        self.assertFalse(any("backups" in d["name"].lower() for d in disc))
+
+    def test_trae_auxiliary_dirs_excluded_from_unknown_discovery(self):
+        from mcpmanager import profiles as profiles_mod
+
+        pool = profiles_mod.load_profiles(reload=True)
+        self.assertEqual(len(pool["trae"].paths), 2)
+        self.assertEqual(len(pool["trae-solo"].paths), 2)
+
+        win_home = self.tmp / "win_home_trae"
+        appdata = self.tmp / "appdata_trae"
+        (win_home / ".trae-cn").mkdir(parents=True)
+        (win_home / ".trae-cn" / "mcp.json").write_text('{"mcpServers": {"p": {"command": "node"}}}\n', encoding="utf-8")
+        (win_home / ".trae-aicc").mkdir(parents=True)
+        (win_home / ".trae-aicc" / "mcp.json").write_text('{"mcpServers": {"q": {"command": "node"}}}\n', encoding="utf-8")
+        (appdata / "TRAE SOLO CN" / "skills" / "s1").mkdir(parents=True)
+
+        fake_win = targets.Target(
+            id="windows", name="Windows 本机", kind="windows", online=True,
+            os_name="Windows", user="u", home=str(win_home),
+        )
+        with mock.patch.dict(os.environ, {"APPDATA": str(appdata), "LOCALAPPDATA": str(self.tmp / "empty_local")}):
+            disc = targets._discover_unknown_windows_agents(fake_win, set(), set())
+        self.assertEqual(disc, [])
+
+    def test_identity_classification_routing_and_effective_skills(self):
+        # Lone config file without exe/runtime -> residual
+        state, _conf, ev, is_res = targets._classify_agent_identity(
+            qualified_id="windows/claude-code",
+            has_exe=False,
+            has_runtime=False,
+            has_config=True,
+            has_skills=False,
+            has_magpie_applied=False,
+            mcp_count=0,
+            overrides={},
+        )
+        self.assertEqual(state, "residual")
+        self.assertTrue(is_res)
+        self.assertEqual(ev, ["config_file"])
+
+        # User override confirmed/ignored
+        id_file = self.tmp / "agent-identity.json"
+        targets.set_agent_identity_override("windows/claude-code", "confirmed", path=id_file)
+        state2, conf2, _, is_res2 = targets._classify_agent_identity(
+            qualified_id="windows/claude-code",
+            has_exe=False,
+            has_runtime=False,
+            has_config=True,
+            has_skills=False,
+            has_magpie_applied=False,
+            mcp_count=0,
+            overrides=targets.load_identity_overrides(id_file),
+        )
+        self.assertEqual(state2, "confirmed")
+        self.assertEqual(conf2, 1.0)
+        self.assertFalse(is_res2)
+
+        # Routing status: direct vs hybrid vs routed
+        self.assertEqual(targets._routing_status({"laya": {"command": "py"}}), ("direct", False))
+        self.assertEqual(
+            targets._routing_status({"magpie": {"url": "http://127.0.0.1:3425/mcp"}, "laya": {"command": "py"}}),
+            ("hybrid", True),
+        )
+        self.assertEqual(targets._routing_status({"magpie": {"url": "http://127.0.0.1:3425/mcp"}}), ("routed", True))
+
+        # Windows Pi profile exists
+        from mcpmanager import profiles as profiles_mod
+        pool = profiles_mod.load_profiles(reload=True)
+        self.assertIn("pi", pool)
+        self.assertTrue(pool["pi"].shared_skills_reader)
 
 
 class PathIsolationAndRollbackTests(unittest.TestCase):
@@ -295,6 +473,68 @@ class SkillsAndMagpieTests(unittest.TestCase):
             diff = magpie.magpie_diff()
         self.assertEqual(len(diff["pathViolations"]), 1)
         self.assertEqual(diff["pathViolations"][0]["name"], "bad")
+
+    def test_summarize_skills_plan_rows_and_diff(self):
+        plan = {
+            "target": "wsl:Ubuntu-24.04",
+            "sourceAgent": "pi",
+            "destAgent": "codex",
+            "sourcePath": "/home/alice/.pi/agent/skills",
+            "destPath": "/home/alice/.codex/skills",
+            "mode": "copy",
+            "destSnapshotHash": "abc123",
+            "added": ["jupyter"],
+            "updated": ["bio"],
+            "kept": ["context-mode"],
+            "conflicts": [{"name": "nature-figure", "reason": "目标副本已被用户手动修改"}],
+            "preserved": [".system"],
+            "skipped": [],
+        }
+        rows = skills.summarize_skills_plan_rows(
+            plan,
+            source_entries=["context-mode", "jupyter", "bio", "nature-figure"],
+            dest_entries=["context-mode", "bio", "nature-figure", "local-only"],
+        )
+        by_name = {r["skill"]: r for r in rows}
+        self.assertEqual(by_name["jupyter"]["action"], "新增")
+        self.assertEqual(by_name["bio"]["action"], "更新")
+        self.assertEqual(by_name["context-mode"]["action"], "保留")
+        self.assertEqual(by_name["nature-figure"]["action"], "冲突")
+        self.assertEqual(by_name[".system"]["action"], "不处理")
+        self.assertEqual(by_name["local-only"]["sourceState"], "仅目标存在")
+
+        diff_text = skills.format_skills_plan_diff(plan)
+        self.assertIn("+ jupyter", diff_text)
+        self.assertIn("~ bio", diff_text)
+        self.assertIn("! nature-figure", diff_text)
+        self.assertIn("# .system", diff_text)
+
+    def test_plan_skills_sync_empty_include_returns_empty_and_shared_rejects_partial(self):
+        pi_skills = self.tmp / "pi_skills_empty"
+        codex_skills = self.tmp / "codex_skills_empty"
+        (pi_skills / "a").mkdir(parents=True)
+        (pi_skills / "a" / "SKILL.md").write_text("# a", encoding="utf-8")
+        (pi_skills / "b").mkdir(parents=True)
+        (pi_skills / "b" / "SKILL.md").write_text("# b", encoding="utf-8")
+
+        fake_win = targets.Target(
+            id="windows", name="Windows", kind="windows", online=True, os_name="Windows", user="u", home=str(self.tmp)
+        )
+        fake_agents = [
+            {"agent": "pi", "skillsPath": str(pi_skills)},
+            {"agent": "codex", "skillsPath": str(codex_skills)},
+        ]
+        with mock.patch.object(targets, "resolve_target", return_value=fake_win), \
+             mock.patch.object(targets, "detect_target_agents", return_value=fake_agents), \
+             mock.patch.object(skills, "SKILLS_STATE_PATH", self.tmp / "skills-sync.json"):
+            empty_plan = skills.plan_skills_sync("windows", "pi", "codex", mode="copy", include=[])
+            self.assertEqual(empty_plan["added"], [])
+            self.assertEqual(empty_plan["updated"], [])
+            self.assertEqual(empty_plan["kept"], [])
+            self.assertTrue(empty_plan["alreadySynced"])
+
+            with self.assertRaises(ValueError):
+                skills.plan_skills_sync("windows", "pi", "codex", mode="shared-directory", include=["a"])
 
 
 if __name__ == "__main__":

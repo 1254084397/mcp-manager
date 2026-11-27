@@ -12,10 +12,10 @@ from .model import Profile
 
 _CACHE: dict[str, Profile] | None = None
 
-_BOOL_FIELDS = {"enabled", "tools", "readonly", "auxiliary_optional"}
+_BOOL_FIELDS = {"enabled", "tools", "readonly", "auxiliary_optional", "shared_skills_reader"}
 _STRING_FIELDS = {"id", "name", "config", "format", "schema", "command", "env",
                   "transport", "stdio_type", "http_type", "url_key", "notes",
-                  "config_priority"}
+                  "config_priority", "skills", "shared_skills"}
 
 
 def _check_strings(value, field: str, source: str) -> list[str]:
@@ -44,10 +44,14 @@ def _profile_from_file(path: Path) -> Profile:
     for key in _BOOL_FIELDS:
         if key in data and not isinstance(data[key], bool):
             raise ValueError(f"{path.name}: {key} 必须是 true/false")
-    for key in ("configs", "aliases"):
+    for key in ("configs", "aliases", "executables"):
         if key in data:
             data[key] = _check_strings(data[key], key, path.name)
-    for template in [data["config"], *data.get("configs", [])]:
+    templates = [data["config"], *data.get("configs", [])]
+    for sk_key in ("skills", "shared_skills"):
+        if data.get(sk_key):
+            templates.append(data[sk_key])
+    for template in templates:
         for placeholder in re.findall(r"\{(\w+)\}", template):
             if placeholder not in paths.PLACEHOLDERS:
                 raise ValueError(f"{path.name}: 未知路径占位符 {{{placeholder}}}")

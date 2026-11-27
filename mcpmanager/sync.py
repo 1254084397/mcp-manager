@@ -374,6 +374,8 @@ def build_target_candidate(
     if agent_id not in agents:
         raise KeyError(f"目标 {target.id} 中未检测到 Agent：{agent_id}")
     info = agents[agent_id]
+    if info.get("readonly"):
+        raise ValueError(f"Agent {target.id}/{agent_id} 为只读或未知 Agent，禁止生成写入候选。")
     unc_cfg = Path(info["uncConfigPath"])
     if not unc_cfg.exists():
         raise FileNotFoundError(f"找不到 {target.id}/{agent_id} 配置：{info['configPath']}")
