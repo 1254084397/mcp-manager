@@ -46,8 +46,8 @@ class MultiTargetTests(unittest.TestCase):
         )
 
         def fake_unc(_distro: str, posix_path: str) -> Path:
-            rel = posix_path.removeprefix("/home/alice/").replace("/", "\\")
-            return wsl_home / rel
+            rel = posix_path.removeprefix("/home/alice/")
+            return wsl_home.joinpath(*rel.split("/")) if rel else wsl_home
 
         with mock.patch.object(targets, "wsl_unc_path", side_effect=fake_unc):
             agents = targets.detect_target_agents(fake_wsl)
