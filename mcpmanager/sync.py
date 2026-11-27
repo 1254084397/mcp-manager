@@ -115,9 +115,21 @@ def build_candidate(
                 raise SecretError(
                     f"{name} 含有内嵌凭据，且主注册表没有可替代的无密配置，已停止生成候选。"
                 )
-            servers[name] = adapters.to_agent(definition, profile)
+            resolved_def = adapters.resolve_target_spec(definition, "windows")
+            violation = adapters.target_path_violation(resolved_def, "windows")
+            if violation:
+                servers[name] = spec
+                skipped.append({"name": name, "reason": violation})
+                continue
+            servers[name] = adapters.to_agent(resolved_def, profile)
             continue
-        servers[name] = registry.patch_pins(name, spec, registry_data)
+        patched = registry.patch_pins(name, spec, registry_data)
+        violation = adapters.target_path_violation(patched, "windows")
+        if violation:
+            servers[name] = spec
+            skipped.append({"name": name, "reason": violation})
+            continue
+        servers[name] = patched
 
     for reg_name, reg_spec in registry.servers(registry_data).items():
         if not isinstance(reg_spec, dict):
@@ -266,7 +278,11 @@ def install_candidate(profile: Profile, registry_data: dict[str, Any], name: str
     if profile.path.exists():
         section = formats.read_section(profile.path, profile.format, profile.schema)
     pinned = registry.patch_pins(name, definition, registry_data)
-    section[name] = adapters.to_agent(pinned, profile)
+    resolved_def = adapters.resolve_target_spec(pinned, "windows")
+    violation = adapters.target_path_violation(resolved_def, "windows")
+    if violation:
+        raise ValueError(f"{name} 无法安装到 Windows：{violation}")
+    section[name] = adapters.to_agent(resolved_def, profile)
     candidate = {
         "agent": profile.id,
         "agentName": profile.name,
@@ -337,3 +353,240 @@ def attach_agent_and_install(
         entry["agents"] = agents
     candidate = install_candidate(profile, registry_data, name)
     return candidate, agent_added
+
+
+def build_target_candidate(
+    target_id: str,
+    agent_id: str,
+    registry_data: dict[str, Any],
+) -> Path:
+    """Build a target-isolated MCP candidate for Windows or WSL targets."""
+    from . import targets
+
+    target = targets.resolve_target(target_id)
+    if not target.online:
+        raise RuntimeError(f"目标 {target.id} 当前离线，仅支持只读查看。")
+    if target.kind == "windows":
+        profile = profiles_mod.resolve_profile(profiles_mod.load_profiles(), agent_id)
+        return build_candidate(profile, registry_data).path
+
+    agents = {item["agent"]: item for item in targets.detect_target_agents(target)}
+    if agent_id not in agents:
+        raise KeyError(f"目标 {target.id} 中未检测到 Agent：{agent_id}")
+    info = agents[agent_id]
+    unc_cfg = Path(info["uncConfigPath"])
+    if not unc_cfg.exists():
+        raise FileNotFoundError(f"找不到 {target.id}/{agent_id} 配置：{info['configPath']}")
+
+    fake_profile = Profile(
+        id=agent_id,
+        name=info["name"],
+        config=info["configPath"],
+        format=info["format"],
+        schema=info["schema"],
+        command="array" if agent_id == "opencode" else "string",
+        env="environment" if agent_id == "opencode" else "env",
+        transport="type" if agent_id == "opencode" else "",
+        stdio_type="local" if agent_id == "opencode" else "stdio",
+        http_type="remote" if agent_id == "opencode" else "http",
+    )
+    section = formats.read_section(unc_cfg, info["format"], info["schema"])
+    servers: dict[str, Any] = {}
+    skipped: list[dict[str, str]] = []
+    conflicts: list[dict[str, str]] = []
+    managed_map = provenance.load_managed().get(f"{target.id}/{agent_id}", {})
+
+    for name, spec in section.items():
+        if not isinstance(spec, dict):
+            servers[name] = spec
+            continue
+        if adapters.is_magpie_managed(spec):
+            servers[name] = spec
+            skipped.append({"name": name, "reason": "Magpie 管理的 MCP，原样保留"})
+            continue
+        if adapters.level_of(spec, fake_profile) == "host":
+            servers[name] = spec
+            skipped.append({"name": name, "reason": "宿主/插件级 MCP，原样保留"})
+            continue
+        if adapters.has_inline_secret(spec):
+            definition = registry.entry(registry_data, name)
+            if not definition:
+                raise SecretError(f"{name} 含有内嵌凭据，且无安全替代定义，已停止生成候选。")
+            resolved_def = adapters.resolve_target_spec(definition, target.kind)
+            violation = adapters.target_path_violation(resolved_def, target.kind)
+            if violation:
+                servers[name] = spec
+                skipped.append({"name": name, "reason": violation})
+                continue
+            servers[name] = adapters.to_agent(resolved_def, fake_profile)
+            continue
+
+        definition = registry.entry(registry_data, name)
+        managed_entry = managed_map.get(name) if isinstance(managed_map, dict) else None
+        if definition:
+            resolved_def = adapters.resolve_target_spec(definition, target.kind)
+            violation = adapters.target_path_violation(resolved_def, target.kind)
+            if violation:
+                servers[name] = spec
+                skipped.append({"name": name, "reason": violation})
+                continue
+            if managed_entry is None:
+                conflicts.append({"name": name, "reason": "用户手动配置与注册表同时存在，禁止静默覆盖"})
+                skipped.append({"name": name, "reason": "用户手动配置与注册表冲突，已保留"})
+                servers[name] = spec
+                continue
+        patched = registry.patch_pins(name, spec, registry_data)
+        violation = adapters.target_path_violation(patched, target.kind)
+        if violation:
+            servers[name] = spec
+            skipped.append({"name": name, "reason": violation})
+            continue
+        servers[name] = patched
+
+    summary = _plan_summary(section, servers, skipped, conflicts)
+    candidate = {
+        "targetEnv": target.id,
+        "targetKind": target.kind,
+        "agent": agent_id,
+        "agentName": info["name"],
+        "targetPath": info["configPath"],
+        "uncTargetPath": str(unc_cfg),
+        "format": info["format"],
+        "schema": info["schema"],
+        "sourceSha256": hashlib.sha256(unc_cfg.read_bytes()).hexdigest(),
+        "generatedAt": dt.datetime.now().isoformat(timespec="seconds"),
+        "summary": summary,
+        "servers": servers,
+    }
+    paths.GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+    safe_target = quote(target.id, safe="-._")
+    path = paths.GENERATED_DIR / f"{safe_target}-{agent_id}-candidate.json"
+    path.write_text(json.dumps(candidate, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def apply_target_candidate(path: Path) -> tuple[Path | None, str]:
+    """Apply a target-isolated candidate with pre-write backup and audit logging."""
+    paths.require_writable("应用目标候选配置")
+    candidate = load_candidate(path)
+    target_env = candidate.get("targetEnv", "windows")
+    if target_env == "windows":
+        return apply_candidate(path)
+
+    from . import targets
+
+    target = targets.resolve_target(target_env)
+    if not target.online:
+        raise RuntimeError(f"目标 {target.id} 当前离线，禁止写入。")
+    unc_cfg = Path(candidate["uncTargetPath"])
+    if not unc_cfg.exists() or hashlib.sha256(unc_cfg.read_bytes()).hexdigest() != candidate["sourceSha256"]:
+        raise formats.ConfigError("目标配置在生成候选后已变化，请重新生成候选。")
+    after = candidate.get("servers") if isinstance(candidate.get("servers"), dict) else {}
+    summary = candidate.get("summary") or {}
+    changed_names = set(summary.get("added", [])) | set(summary.get("updated", []))
+    for srv_name, srv_spec in after.items():
+        if srv_name in changed_names and isinstance(srv_spec, dict):
+            violation = adapters.target_path_violation(srv_spec, target.kind)
+            if violation:
+                raise ValueError(f"{srv_name} 违反跨平台路径隔离：{violation}")
+
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup = unc_cfg.with_name(f"{unc_cfg.name}.bak.{stamp}")
+    shutil.copy2(unc_cfg, backup)
+    mode = formats.write_section(unc_cfg, candidate["format"], candidate["schema"], after)
+    provenance.record_audit(
+        agent=candidate["agent"],
+        target_path=Path(candidate["targetPath"]),
+        mode=mode,
+        backup_path=backup,
+        summary=summary,
+        target_env=target_env,
+        result="ok",
+    )
+    return backup, mode
+
+
+def rollback_from_audit(target_env: str, agent_id: str) -> tuple[Path, Path | None]:
+    """Restore the most recent backup recorded in ``local/audit.jsonl`` (MCP or Skills)."""
+    paths.require_writable("回滚配置")
+    entries = provenance.load_audit(agent=agent_id, target_env=target_env, limit=50)
+    chosen = next(
+        (item for item in reversed(entries) if item.get("backupPath") and Path(item["backupPath"]).exists()),
+        None,
+    )
+    if chosen is None:
+        raise FileNotFoundError(f"未找到 {target_env}/{agent_id} 可用的回滚备份记录。")
+    backup_src = Path(chosen["backupPath"])
+    is_skills = str(chosen.get("mode", "")).startswith("skills:")
+
+    if is_skills:
+        if target_env == "windows":
+            live_path = Path(chosen["targetPath"])
+            stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            safety = paths.BACKUP_DIR / f"skills-before-rollback-{agent_id}-{stamp}"
+            if live_path.exists() or live_path.is_symlink():
+                if live_path.is_symlink():
+                    live_path.unlink()
+                else:
+                    shutil.copytree(live_path, safety, symlinks=True)
+                    shutil.rmtree(live_path)
+            else:
+                safety = None
+            shutil.copytree(backup_src, live_path, symlinks=True)
+        else:
+            from . import targets
+
+            target = targets.resolve_target(target_env)
+            if not target.online:
+                raise RuntimeError(f"目标 {target.id} 当前离线，禁止回滚写入。")
+            live_path = targets.wsl_unc_path(target.distro, chosen["targetPath"])
+            stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            safety = live_path.with_name(f"{live_path.name}.bak.before-rollback-{stamp}")
+            if live_path.exists() or live_path.is_symlink():
+                if live_path.is_symlink():
+                    live_path.unlink()
+                    safety = None
+                else:
+                    shutil.copytree(live_path, safety, symlinks=True)
+                    shutil.rmtree(live_path)
+            else:
+                safety = None
+            shutil.copytree(backup_src, live_path, symlinks=True)
+        provenance.record_audit(
+            agent=agent_id,
+            target_path=Path(chosen["targetPath"]),
+            mode="skills:rollback",
+            backup_path=safety,
+            summary={"added": [], "updated": [], "kept": [], "removed": [], "skipped": [], "conflicts": []},
+            target_env=target_env,
+            result="ok",
+        )
+        return backup_src, safety
+
+    if target_env == "windows":
+        profile = profiles_mod.resolve_profile(profiles_mod.load_profiles(), agent_id)
+        live_path = profile.path
+        safety = _backup(live_path, f"{agent_id}-before-rollback") if live_path.exists() else None
+    else:
+        from . import targets
+
+        target = targets.resolve_target(target_env)
+        if not target.online:
+            raise RuntimeError(f"目标 {target.id} 当前离线，禁止回滚写入。")
+        live_path = targets.wsl_unc_path(target.distro, chosen["targetPath"])
+        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        safety = live_path.with_name(f"{live_path.name}.bak.before-rollback-{stamp}") if live_path.exists() else None
+        if safety is not None:
+            shutil.copy2(live_path, safety)
+    live_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(backup_src, live_path)
+    provenance.record_audit(
+        agent=agent_id,
+        target_path=Path(chosen["targetPath"]),
+        mode="rollback",
+        backup_path=safety,
+        summary={"added": [], "updated": [], "kept": [], "removed": [], "skipped": [], "conflicts": []},
+        target_env=target_env,
+        result="ok",
+    )
+    return backup_src, safety

@@ -11,8 +11,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import (adapters, discovery, doctor, formats, handshake, health, paths,
-               profiles as profiles_mod, provenance, registry, sync, versioning)
+from . import (adapters, context_audit, discovery, doctor, formats, handshake, health, magpie,
+               paths, profiles as profiles_mod, provenance, registry, skills, sync, targets, versioning)
 
 
 def _profiles():
@@ -322,6 +322,25 @@ def collect_status() -> dict[str, Any]:
 
 def _cmd_status(args: argparse.Namespace) -> int:
     """Summarize live Agent config locations and last known MCP health."""
+    if getattr(args, "target", None):
+        target = targets.resolve_target(args.target)
+        t_agents = targets.detect_target_agents(target)
+        payload = {
+            "schemaVersion": 2,
+            "generatedAt": dt.datetime.now().isoformat(timespec="seconds"),
+            "target": target.id,
+            "online": target.online,
+            "agents": t_agents,
+        }
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 0
+        print(f"目标：{target.name}（{target.id}）  状态：{'在线' if target.online else '离线'}  用户：{target.user or '-'}  HOME：{target.home or '-'}")
+        print(f"{'QUALIFIED_ID':32} {'配置状态':10} {'MCP':>4} {'Skills':>6} 配置路径")
+        for item in t_agents:
+            mc = "-" if item["mcpCount"] is None else str(item["mcpCount"])
+            print(f"{item['qualifiedId']:32} {item['configState']:10} {mc:>4} {item['skillsCount']:>6} {item['configPath']}")
+        return 0
     report = collect_status()
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -382,6 +401,32 @@ def _cmd_updates(_args: argparse.Namespace) -> int:
 
 
 def _cmd_sync(args: argparse.Namespace) -> int:
+    target_id = getattr(args, "target", None) or "windows"
+    if target_id != "windows":
+        cand_path = sync.build_target_candidate(target_id, args.agent, registry.load())
+        summary = sync.summarize_candidate(cand_path)
+        diff = sync.candidate_diff(cand_path)
+        print(f"目标：{target_id}  Agent：{args.agent}")
+        print(f"候选已生成：{cand_path}")
+        print(
+            "变更计划："
+            f"新增 {len(summary['added'])}，更新 {len(summary['updated'])}，"
+            f"保留 {len(summary['kept'])}，跳过 {len(summary['skipped'])}，冲突 {len(summary.get('conflicts', []))}"
+        )
+        for item in summary["skipped"]:
+            print(f"  [跳过] {item['name']}：{item['reason']}")
+        if diff:
+            print("--- 差异预览（凭据已脱敏） ---")
+            print(diff)
+        if not args.apply:
+            print("未应用。检查候选后加 --apply 执行。")
+            return 0
+        if not args.yes and not _confirm(f"确认备份并写入 {target_id}/{args.agent}？"):
+            print("已取消。")
+            return 1
+        backup, mode = sync.apply_target_candidate(cand_path)
+        print(f"已应用（{mode}）。备份：{backup}")
+        return 0
     profile = _profile(args.agent)
     data = registry.load()
     candidate = sync.build_candidate(profile, data)
@@ -557,15 +602,18 @@ def _cmd_paths(_args: argparse.Namespace) -> int:
 
 
 def _cmd_audit(args: argparse.Namespace) -> int:
-    agent = _profile(args.agent).id if args.agent else None
-    entries = provenance.load_audit(agent=agent, limit=args.limit)
+    target_env = getattr(args, "target", None)
+    agent = args.agent
+    if agent and (not target_env or target_env == "windows"):
+        agent = _profile(agent).id
+    entries = provenance.load_audit(agent=agent, target_env=target_env, limit=args.limit)
     if args.json:
         print(json.dumps({"entries": entries}, ensure_ascii=False, indent=2))
         return 0
     if not entries:
         print("暂无同步审计记录。")
         return 0
-    print(f"{'时间':19} {'AGENT':14} {'模式':10} {'结果':6} {'新增/更/删/跳/冲突':16} 备份")
+    print(f"{'时间':19} {'目标':16} {'AGENT':12} {'模式':10} {'结果':6} {'新增/更/删/跳/冲突':16} 备份")
     for item in entries:
         s = item.get("summary") or {}
         counts = (
@@ -575,11 +623,150 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         )
         print(
             f"{str(item.get('timestamp', '-')):19} "
-            f"{str(item.get('agent', '-')):14} "
+            f"{str(item.get('targetEnv', 'windows')):16} "
+            f"{str(item.get('agent', '-')):12} "
             f"{str(item.get('mode', '-')):10} "
             f"{str(item.get('result', '-')):6} "
             f"{counts:16} {item.get('backupPath') or '-'}"
         )
+    return 0
+
+
+def _cmd_targets(args: argparse.Namespace) -> int:
+    report = targets.collect_targets_report()
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+    print(f"{'TARGET':18} {'类型':8} {'状态':6} {'用户':14} {'Agent数':>7} HOME")
+    for item in report["targets"]:
+        online = "在线" if item["online"] else "离线"
+        print(f"{item['id']:18} {item['kind']:8} {online:6} {item['user'] or '-':14} {len(item['agents']):>7} {item['home'] or '-'}")
+    return 0
+
+
+def _cmd_detect(args: argparse.Namespace) -> int:
+    report = targets.collect_targets_report(args.target)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+    for t in report["targets"]:
+        print(f"目标：{t['name']}（{t['id']}）  在线：{'是' if t['online'] else '否'}  OS：{t['os']}  用户：{t['user']}")
+        tools_str = ", ".join(f"{k}={'OK' if v else 'NO'}" for k, v in t["tools"].items())
+        print(f"工具：{tools_str}  Magpie：{'可访问' if t['magpieReachable'] else '未发现'}")
+        for ag in t["agents"]:
+            print(f"  - {ag['qualifiedId']:28} MCP={ag['mcpCount']}  Skills={ag['skillsCount']}  {ag['configPath']}")
+    return 0
+
+
+def _cmd_skills(args: argparse.Namespace) -> int:
+    action = args.skills_action
+    if action == "list":
+        data = skills.list_target_skills(args.target)
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+            return 0
+        for ag in data["agents"]:
+            print(f"{ag['target']}/{ag['agent']}  模式={ag['mode']}  数量={ag['count']}  路径={ag['skillsPath']}")
+        return 0
+    if action == "status":
+        data = skills.skills_status(args.target)
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+            return 0
+        for ag in data["agents"]:
+            print(f"{ag['target']}/{ag['agent']:14} 模式={ag['mode']:18} 数量={ag['count']:>3}  {ag['syncNote']}")
+        return 0
+    if action == "sync":
+        plan = skills.plan_skills_sync(
+            args.target or "windows",
+            args.source,
+            args.agent,
+            mode=args.mode,
+            include=args.include,
+            replace=args.replace,
+        )
+        print(f"目标：{plan['target']}  模式：{plan['mode']}（修改已有Skill自动同步：{'是' if plan['autoSyncsOnEdit'] else '否'}）")
+        print(
+            f"新增：{len(plan['added'])}  更新：{len(plan['updated'])}  "
+            f"保留：{len(plan['kept'])}  系统保留：{', '.join(plan['preserved']) or '无'}  跳过：{len(plan['skipped'])}"
+        )
+        if not args.apply:
+            print("未应用。确认后加 --apply 执行。")
+            return 0
+        if not args.yes and not _confirm(f"确认按 {plan['mode']} 同步 Skills 到 {plan['destAgent']}？"):
+            print("已取消。")
+            return 1
+        res = skills.apply_skills_sync(plan)
+        print(f"Skills 同步完成：新增 {len(res['added'])} 项，更新 {len(res['updated'])} 项，备份：{res['backup'] or '无'}。")
+        return 0
+    return 1
+
+
+def _cmd_rollback(args: argparse.Namespace) -> int:
+    if not args.yes and not _confirm(f"确认回滚 {args.target}/{args.agent} 到最近一次备份？"):
+        print("已取消。")
+        return 1
+    used, safety = sync.rollback_from_audit(args.target, args.agent)
+    print(f"已回滚到：{used}（当前配置已先备份至：{safety or '无'}）")
+    return 0
+
+
+def _cmd_magpie(args: argparse.Namespace) -> int:
+    action = args.magpie_action
+    fn = {
+        "status": magpie.magpie_status,
+        "agents": magpie.magpie_agents,
+        "library": magpie.magpie_library,
+        "diff": magpie.magpie_diff,
+    }[action]
+    data = fn()
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+    print(json.dumps(data, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _cmd_context(args: argparse.Namespace) -> int:
+    report = context_audit.collect_context_audit(include_wsl=not args.no_wsl)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+    shared = report["sharedSkills"]
+    print(f"公共 Skill 目录：{shared['sharedAgentsDir']}（{shared['sharedSkillCount']} 个）")
+    if shared["magpieLibraryExists"]:
+        print(f"Magpie Skill 总库：{shared['magpieLibraryDir']}（{shared['magpieLibraryCount']} 个）")
+    print()
+    mcp_labels = {"routed": "已折叠(网关)", "hybrid": "混合", "direct": "直连未折叠", "empty": "空", "error": "读取失败"}
+    skill_labels = {
+        "routed": "已折叠(路由)",
+        "leaked_shared": "公共目录泄漏",
+        "expanded": "全量展开",
+        "symlink_shared": "软链共享",
+        "empty": "空",
+        "unknown": "未知",
+    }
+    print(f"{'AGENT':16} {'MCP模式':12} {'MCP数':>5} {'Skill模式':14} {'Skill数':>7} 说明")
+    for row in report["agents"]:
+        mcp_m = mcp_labels.get(row["mcp"]["mode"], row["mcp"]["mode"])
+        sk_m = skill_labels.get(row["skills"]["mode"], row["skills"]["mode"])
+        print(
+            f"{row['agent']:16} {mcp_m:12} {row['mcp']['mcpCount']:>5} "
+            f"{sk_m:14} {row['skills']['count']:>7} {row['skills']['note']}"
+        )
+        for dup in row.get("duplicatePlugins", []):
+            print(f"  [重复插件] 指向同一目录 {dup['resolvedTarget']}：{', '.join(dup['entries'])}")
+    if report["wslAgents"]:
+        print("\nWSL 只读发现：")
+        for row in report["wslAgents"]:
+            mcp_m = mcp_labels.get(row["mcp"]["mode"], row["mcp"]["mode"])
+            sk = row["skills"]
+            link_note = "（目录软链）" if sk["isSymlink"] else (f"（含 {sk['symlinkEntries']} 个软链）" if sk["symlinkEntries"] else "")
+            print(f"  {row['agent']:28} MCP={mcp_m}({row['mcp']['mcpCount']})  Skills={sk['count']}{link_note}")
+    if report["recommendations"]:
+        print("\n优化建议：")
+        for rec in report["recommendations"]:
+            print(f"  - {rec}")
     return 0
 
 
@@ -626,14 +813,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=_cmd_health)
 
     p = sub.add_parser("status", help="汇总 Agent 的有效配置路径、MCP 数量和最近健康状态")
+    p.add_argument("--target", help="按运行目标过滤（如 windows 或 wsl:Ubuntu-24.04）")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=_cmd_status)
+
+    p = sub.add_parser("targets", help="列出本机 Windows 与 WSL 运行目标")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=_cmd_targets)
+
+    p = sub.add_parser("detect", help="探测指定运行目标中的 Agent、工具链与路径")
+    p.add_argument("--target", default="windows")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=_cmd_detect)
 
     p = sub.add_parser("updates", help="检查可升级的包")
     p.set_defaults(func=_cmd_updates)
 
     p = sub.add_parser("sync", help="生成候选配置")
     p.add_argument("--agent", required=True)
+    p.add_argument("--target", default="windows", help="运行目标（windows 或 wsl:<distro>）")
     p.add_argument("--apply", action="store_true")
     p.add_argument("--yes", action="store_true")
     p.set_defaults(func=_cmd_sync)
@@ -681,10 +879,47 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=_cmd_install)
 
     p = sub.add_parser("audit", help="查看同步审计记录")
+    p.add_argument("--target", help="按运行目标过滤（windows 或 wsl:<distro>）")
     p.add_argument("--agent")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=_cmd_audit)
+
+    p = sub.add_parser("rollback", help="按审计记录回滚指定目标与 Agent 的配置")
+    p.add_argument("--target", default="windows")
+    p.add_argument("--agent", required=True)
+    p.add_argument("--yes", action="store_true")
+    p.set_defaults(func=_cmd_rollback)
+
+    skills_parser = sub.add_parser("skills", help="管理各目标下的 Agent Skills")
+    skills_sub = skills_parser.add_subparsers(dest="skills_action", required=True)
+    for name in ("list", "status"):
+        sp = skills_sub.add_parser(name)
+        sp.add_argument("--target", default="windows")
+        sp.add_argument("--json", action="store_true")
+        sp.set_defaults(func=_cmd_skills)
+    sp = skills_sub.add_parser("sync")
+    sp.add_argument("--target", default="windows")
+    sp.add_argument("--source", default="pi")
+    sp.add_argument("--agent", required=True)
+    sp.add_argument("--mode", choices=skills.SYNC_MODES, default="symlink-per-entry")
+    sp.add_argument("--include", action="append")
+    sp.add_argument("--replace", action="store_true", help="shared-directory 模式下允许备份并替换非空目标目录")
+    sp.add_argument("--apply", action="store_true")
+    sp.add_argument("--yes", action="store_true")
+    sp.set_defaults(func=_cmd_skills)
+
+    magpie_parser = sub.add_parser("magpie", help="只读查看 Magpie 纳管状态与路径差异")
+    magpie_sub = magpie_parser.add_subparsers(dest="magpie_action", required=True)
+    for name in ("status", "agents", "library", "diff"):
+        mp = magpie_sub.add_parser(name)
+        mp.add_argument("--json", action="store_true")
+        mp.set_defaults(func=_cmd_magpie)
+
+    p = sub.add_parser("context", help="审计各 Agent（含 WSL）的 MCP 路由、Skill 折叠与重复插件")
+    p.add_argument("--no-wsl", action="store_true", help="跳过 WSL 发行版只读扫描")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=_cmd_context)
 
     sub.add_parser("gui", help="打开图形界面").set_defaults(func=_cmd_gui)
     return parser

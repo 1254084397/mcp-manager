@@ -64,6 +64,58 @@ def redact_text(text: str) -> str:
     return cleaned
 
 
+_WINDOWS_PATH_RE = re.compile(r"(?:[A-Za-z]:[/\\]|\\Users\\|/Users/|Program Files)", re.IGNORECASE)
+_POSIX_PATH_RE = re.compile(r"^/(?:home|usr|opt|etc|var|root|mnt)/")
+
+
+def _iter_exec_tokens(spec: dict[str, Any]) -> list[str]:
+    tokens: list[str] = []
+    cmd = command_of(spec)
+    if cmd:
+        tokens.append(cmd)
+    tokens.extend(args_of(spec))
+    return tokens
+
+
+def has_windows_path(spec: dict[str, Any]) -> bool:
+    for token in _iter_exec_tokens(spec):
+        if "://" in token:
+            continue
+        if _WINDOWS_PATH_RE.search(token):
+            return True
+    return False
+
+
+def has_posix_path(spec: dict[str, Any]) -> bool:
+    for token in _iter_exec_tokens(spec):
+        if "://" in token:
+            continue
+        if _POSIX_PATH_RE.search(token):
+            return True
+    return False
+
+
+def target_path_violation(spec: dict[str, Any], target_kind: str) -> str | None:
+    """Return a reason if ``spec`` contains paths incompatible with ``target_kind``."""
+    if target_kind in {"wsl", "ssh", "linux"} and has_windows_path(spec):
+        return "包含 Windows 路径（如 C:/D:/E:/Users/Program Files），禁止写入 WSL/Linux"
+    if target_kind == "windows" and has_posix_path(spec):
+        return "包含 POSIX/Ubuntu 路径（如 /home/ 或 /usr/），禁止写入 Windows"
+    return None
+
+
+def resolve_target_spec(definition: dict[str, Any], target_kind: str) -> dict[str, Any]:
+    """Resolve platform-specific ``targets.<kind>`` overrides in a registry entry."""
+    targets_map = definition.get("targets")
+    if isinstance(targets_map, dict):
+        platform_spec = targets_map.get(target_kind)
+        if isinstance(platform_spec, dict):
+            merged = {k: v for k, v in definition.items() if k != "targets"}
+            merged.update(platform_spec)
+            return merged
+    return {k: v for k, v in definition.items() if k != "targets"}
+
+
 def clean_spec(spec: dict[str, Any]) -> dict[str, Any]:
     """Drop registry bookkeeping so only runnable fields reach an Agent."""
     return {key: value for key, value in spec.items() if key not in META_KEYS}

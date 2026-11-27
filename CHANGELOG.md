@@ -2,6 +2,16 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [1.5.0] - 2026-11-27
+
+### 新增
+
+- 新增 `mcpmanager context [--no-wsl] [--json]` 命令与 GUI「上下文审计」（`Ctrl+K`）：
+  - 区分每个 Agent 的 MCP 路由模式（`routed` 单网关折叠 / `hybrid` / `direct` 直连未折叠）；
+  - 检查 Skill 目录折叠状态，识别 `~/.agents/skills` 公共目录导致的上下文泄漏（`leaked_shared`）与目录软链接/Junction（`symlink_shared`），防止误覆盖或误删共享物理目录；
+  - 检测同一配置文件中指向同一物理目录的重复插件条目（如 OpenCode 重复插件）；
+  - 支持安全只读扫描本机 WSL 发行版中的 Pi、Codex 与 Antigravity 状态及软链接关系。
+
 ## [1.4.1] - 2026-11-25
 
 ### 修复

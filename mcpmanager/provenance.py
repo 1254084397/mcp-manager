@@ -91,15 +91,24 @@ def record_audit(
     summary: dict[str, Any],
     result: str = "ok",
     error: str | None = None,
+    target_env: str = "windows",
+    source: str = "mcp-manager",
+    skill_changes: list[Any] | None = None,
     path: Path | None = None,
 ) -> None:
     if paths.read_only():
         return
     target = path or AUDIT_PATH
     now = dt.datetime.now().isoformat(timespec="seconds")
+    mcp_changes = [
+        *(f"+{name}" for name in summary.get("added", [])),
+        *(f"~{name}" for name in summary.get("updated", [])),
+        *(f"-{name}" for name in summary.get("removed", [])),
+    ]
     entry = {
         "createdAt": now,
         "timestamp": now,
+        "targetEnv": target_env,
         "agent": agent,
         "target": str(target_path),
         "targetPath": str(target_path),
@@ -112,6 +121,9 @@ def record_audit(
         "preserved": list(summary.get("kept", [])),
         "skipped": list(summary.get("skipped", [])),
         "conflicts": list(summary.get("conflicts", [])),
+        "mcpChanges": mcp_changes,
+        "skillChanges": list(skill_changes or []),
+        "source": source,
         "summary": summary,
         "result": result,
         "error": error,
@@ -123,6 +135,7 @@ def record_audit(
 
 def load_audit(
     agent: str | None = None,
+    target_env: str | None = None,
     limit: int = 20,
     path: Path | None = None,
 ) -> list[dict[str, Any]]:
@@ -141,6 +154,8 @@ def load_audit(
         if not isinstance(item, dict):
             continue
         if agent and item.get("agent") != agent:
+            continue
+        if target_env and item.get("targetEnv", "windows") != target_env:
             continue
         entries.append(item)
     return entries[-limit:] if limit > 0 else entries

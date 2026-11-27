@@ -132,6 +132,7 @@ mcpmanager agents
 | `health [--agent ID] [--json]` | 查看上次握手缓存（`local/health.json`） |
 | `status [--json]` | 汇总检测状态、有效/重定向路径、MCP 数量、来源分布、冲突与最近健康状态（`--json` 为 `schemaVersion: 2`） |
 | `audit [--agent ID] [--limit N] [--json]` | 查看 `local/audit.jsonl` 中的增量同步审计记录 |
+| `context [--no-wsl] [--json]` | 审计各 Agent（含 WSL 只读）的 MCP 路由折叠、Skill 上下文开销、公共目录泄漏与重复插件 |
 | `updates` | 对比注册表版本与 npm/PyPI 最新版本，区分已是最新、有新版本、当前更高、无法比较 |
 | `sync --agent ID [--apply] [--yes]` | 生成候选；`--apply` 备份后写入 |
 | `apply 候选文件 [--yes]` | 应用指定候选（含安装候选） |
@@ -155,6 +156,7 @@ mcpmanager/                核心代码
   adapters.py              标准字段 <-> 各 Agent 字段
   sync.py                  候选生成、增量合并、冲突保护、备份、应用
   provenance.py            受管标记（managed.json）与同步审计记录（audit.jsonl）
+  context_audit.py         MCP 路由/Skill 上下文开销、重复插件与 WSL 只读审计
   discovery.py             扫描与配置来源分级
   doctor.py                配置与运行时诊断
   handshake.py             MCP 协议握手（initialize / tools/list）
