@@ -4,7 +4,7 @@
 
 # MCP Manager
 
-**跨 Agent 的 MCP 管理工具：扫描、检查、备份、同步和升级 MCP 服务。**
+**跨 Agent 的 MCP 与 Skills 管理工具：统一扫描、诊断、备份、安全同步与版本升级。**
 
 [![Release](https://img.shields.io/github/v/release/1254084397/mcp-manager?include_prereleases&style=flat-square&color=0ea5e9)](https://github.com/1254084397/mcp-manager/releases/latest)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
@@ -66,8 +66,16 @@ python -m mcpmanager probe --agent trae --name context-mode --timeout 15 --json
 # 查看上次握手缓存
 python -m mcpmanager health --agent trae
 
-# 汇总每个 Agent 的实际配置路径、MCP 数量和最近健康状态
+# 汇总运行目标（Windows / WSL）及 Agent 状态
+python -m mcpmanager targets
 python -m mcpmanager status
+
+# 审计 MCP 路由、Skill 折叠与 WSL 只读状态
+python -m mcpmanager context
+
+# 查看与同步 Skills（支持 shared-directory / symlink-per-entry / copy）
+python -m mcpmanager skills status --target windows
+python -m mcpmanager skills sync --target wsl:Ubuntu-24.04 --source pi --agent codex
 
 # 只读模式：允许扫描、诊断、握手和报告，禁止写入、安装、升级
 python -m mcpmanager --read-only scan
@@ -106,42 +114,42 @@ mcpmanager agents
 
 `python -m mcpmanager gui` 打开桌面管理器：
 
-- 左侧 Agent 侧栏只显示本机实际检测到的 Agent；未发现配置的内置 profile 不再显示为灰色条目。CLI 仍可通过显式 Agent ID 管理未初始化的 profile；
-- 顶部搜索、列排序、右键菜单（诊断、握手测试、改版本、更新、从注册表移除、从当前 Agent 卸载）；
-- 可在“操作 → 添加 MCP…”中填写 command/URL、参数、环境变量和版本信息，登记后自动生成当前 Agent 的候选配置；
-- 添加流程只针对当前选中的 Agent，应用前可审阅候选和差异，写入时自动备份；管理器不会因此自动安装 MCP 包或浏览器等依赖；
-- 右键“从当前 Agent 卸载…”会生成只删除该 MCP 的候选配置，审阅差异后应用，写入前自动备份；注册表中的定义保留，便于之后重新安装。
-- 下方详情面板显示启动命令、参数、脱敏后的环境变量、来源文件和上次握手缓存；附加配置中的 MCP 标记为“附加配置·只读”；
-- 候选预览可以查看 JSON 和 unified diff，确认后再应用；
-- 备份管理器可列出、恢复或打开历史备份；
-- 可直接修改当前 Agent 的配置位置（支持 `D:/`、`E:/` 等绝对路径），保存为 `local/agents/<id>.toml` 本机覆盖，并可一键恢复默认；
-- 支持浅色/深色主题；窗口大小、所选 Agent、日志状态会记住（`local/settings.json`）；
-- 扫描与版本检查在后台执行，状态栏显示进度，运行日志可折叠。
+- **运行目标与 Agent 侧栏**：按 Windows 本机与 WSL 发行版分组，仅显示本机实际检测到的 Agent（CLI 仍可通过显式 ID 管理未初始化的 profile）；
+- **列表与右键操作**：支持搜索、列排序，以及右键诊断、握手测试、改版本、更新、登记、从当前 Agent 卸载等操作；
+- **添加与卸载 MCP**：在「操作 → 添加 MCP…」或右键「从当前 Agent 卸载…」中完成，均先生成候选并审阅差异，确认后自动备份再写入（不会自动安装外部依赖）；
+- **详情与差异预览**：底部详情面板展示命令、参数、脱敏后的环境变量、来源文件与握手缓存；候选预览支持查看 JSON 与 unified diff；
+- **备份与路径覆盖**：内置备份管理器支持列出和恢复历史备份；支持修改当前 Agent 的配置路径（保存为 `local/agents/<id>.toml` 本机覆盖）并一键恢复默认；
+- **主题与后台任务**：支持浅色/深色主题切换并记住窗口布局（`local/settings.json`）；扫描、审计与版本检查在后台执行。
 
-快捷键：`F5` 刷新、`Ctrl+R` 扫描、`Ctrl+U` 检查更新、`Ctrl+F` 搜索、`Ctrl+B` 备份、`Ctrl+D` 诊断、`Esc` 清空搜索。
+快捷键：`F5` 刷新、`Ctrl+R` 扫描、`Ctrl+U` 检查更新、`Ctrl+F` 搜索、`Ctrl+B` 备份、`Ctrl+D` 诊断、`Ctrl+K` 上下文审计、`Esc` 清空搜索。
 
 ## CLI
 
 | 命令 | 作用 |
 | --- | --- |
-| `agents` | 列出 Agent profile、主配置、附加配置及是否存在 |
-| `list [--agent ID]` | 列出某个 Agent 已配置的 MCP（合并主配置与附加配置） |
+| `agents` | 列出 Agent profile、主配置、附加配置及存在状态 |
+| `targets [--json]` | 列出本机 Windows 与 WSL 运行目标及工具链 |
+| `detect [--target T] [--json]` | 探测指定运行目标中的 Agent、环境与路径 |
+| `list [--agent ID]` | 列出 Agent 已配置的 MCP（合并主配置与附加配置） |
 | `scan [--json]` | 扫描本机配置，按来源分级并输出未登记报告 |
-| `doctor --agent ID [--network] [--env] [--json]` | 检查配置、command 路径、参数路径和本地运行时，可选探测远程 URL；`--json` 写入 `local/reports/` |
-| `probe --agent ID [--name MCP] [--timeout 秒] [--json]` | 真实启动 MCP，执行 initialize 和 tools/list；结果写入握手缓存 |
+| `doctor --agent ID [--network] [--env] [--json]` | 检查命令、参数路径、运行时及远程 URL；`--json` 写入 `local/reports/` |
+| `probe --agent ID [--name MCP] [--timeout 秒] [--json]` | 启动 MCP 执行真实握手（`initialize` + `tools/list`）并缓存结果 |
 | `health [--agent ID] [--json]` | 查看上次握手缓存（`local/health.json`） |
-| `status [--json]` | 汇总检测状态、有效/重定向路径、MCP 数量、来源分布、冲突与最近健康状态（`--json` 为 `schemaVersion: 2`） |
-| `audit [--agent ID] [--limit N] [--json]` | 查看 `local/audit.jsonl` 中的增量同步审计记录 |
-| `context [--no-wsl] [--json]` | 审计各 Agent（含 WSL 只读）的 MCP 路由折叠、Skill 上下文开销、公共目录泄漏与重复插件 |
-| `updates` | 对比注册表版本与 npm/PyPI 最新版本，区分已是最新、有新版本、当前更高、无法比较 |
-| `sync --agent ID [--apply] [--yes]` | 生成候选；`--apply` 备份后写入 |
-| `apply 候选文件 [--yes]` | 应用指定候选（含安装候选） |
-| `add NAME --command ... [--arg ...] [--env K=V]` | 登记一个 MCP |
-| `remove NAME` | 从注册表移除（不改 Agent 配置） |
-| `uninstall NAME --agent ID [--apply] [--yes]` | 从 Agent 配置卸载；默认生成卸载候选，`--apply` 确认后备份并写入 |
+| `status [--target T] [--json]` | 汇总配置路径、MCP 数量、来源分布、冲突与最近健康状态 |
+| `audit [--target T] [--agent ID] [--limit N] [--json]` | 查看 `local/audit.jsonl` 中的同步与 Skills 审计记录 |
+| `context [--no-wsl] [--json]` | 审计 MCP 路由折叠、Skill 上下文开销、公共目录泄漏与重复插件 |
+| `skills {list,status,sync}` | 查看或安全同步各目标下的 Agent Skills（支持备份、冲突保护与 `--replace`） |
+| `magpie {status,agents,library,diff}` | 只读查看 Magpie 纳管状态与跨平台路径差异 |
+| `updates` | 对比注册表与 npm / PyPI 最新版本 |
+| `sync --agent ID [--target T] [--apply] [--yes]` | 生成候选配置；`--apply` 备份后写入 |
+| `rollback --agent ID [--target T] [--yes]` | 按审计记录回滚指定目标与 Agent 的配置或 Skills |
+| `apply 候选文件 [--yes]` | 应用指定候选文件 |
+| `add NAME --command ... [--arg ...] [--env K=V]` | 登记一个 MCP 到主注册表 |
+| `remove NAME` | 从主注册表移除（不改 Agent 配置） |
+| `uninstall NAME --agent ID [--apply] [--yes]` | 从 Agent 配置卸载；默认生成候选，`--apply` 确认后备份并写入 |
 | `catalog [关键词]` | 查看内置 MCP 目录 |
-| `install NAME --agent ID [--apply] [--yes]` | 从目录安装；不带 `--apply` 时生成候选，带 `--apply` 时确认后备份并直接写入 |
-| `gui` | 打开桌面界面 |
+| `install NAME --agent ID [--apply] [--yes]` | 从目录安装；默认生成候选，`--apply` 确认后备份并写入 |
+| `gui` | 打开图形界面 |
 | `paths` | 显示数据目录 |
 
 全局选项 `--read-only`（或环境变量 `MCP_MANAGER_READ_ONLY=1`）会禁止写入注册表和 Agent 配置、安装、升级、应用候选和删除条目，但保留扫描、诊断、握手、报告和握手缓存读取。
@@ -154,8 +162,11 @@ mcpmanager/                核心代码
   catalog/servers.json     内置可安装 MCP 目录
   formats.py               JSON / JSONC / TOML 读写与局部替换
   adapters.py              标准字段 <-> 各 Agent 字段
-  sync.py                  候选生成、增量合并、冲突保护、备份、应用
+  sync.py                  候选生成、增量合并、冲突保护、备份、应用与回滚
   provenance.py            受管标记（managed.json）与同步审计记录（audit.jsonl）
+  targets.py               多运行目标模型（Windows 本机 / WSL 动态探测）
+  skills.py                Skills 3 模式安全同步、所有权跟踪、备份与哈希校验
+  magpie.py                Magpie 只读状态与跨平台路径差异适配器
   context_audit.py         MCP 路由/Skill 上下文开销、重复插件与 WSL 只读审计
   discovery.py             扫描与配置来源分级
   doctor.py                配置与运行时诊断

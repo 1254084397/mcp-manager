@@ -6,11 +6,20 @@
 
 ### 新增
 
-- 新增 `mcpmanager context [--no-wsl] [--json]` 命令与 GUI「上下文审计」（`Ctrl+K`）：
-  - 区分每个 Agent 的 MCP 路由模式（`routed` 单网关折叠 / `hybrid` / `direct` 直连未折叠）；
-  - 检查 Skill 目录折叠状态，识别 `~/.agents/skills` 公共目录导致的上下文泄漏（`leaked_shared`）与目录软链接/Junction（`symlink_shared`），防止误覆盖或误删共享物理目录；
-  - 检测同一配置文件中指向同一物理目录的重复插件条目（如 OpenCode 重复插件）；
-  - 支持安全只读扫描本机 WSL 发行版中的 Pi、Codex 与 Antigravity 状态及软链接关系。
+- **多运行目标管理（Windows + WSL）**：新增 `targets.py` 与 `mcpmanager targets` / `detect` 命令，动态识别本机 WSL 发行版及内部 Agent（Pi、Codex、Antigravity）和工具链；`status`、`sync`、`audit`、`rollback` 支持 `--target`；Windows 与 WSL 路径严格隔离，禁止将 Windows 路径误写入 WSL 配置。
+- **Skills 安全同步与回滚**：新增 `skills.py` 与 `mcpmanager skills {list,status,sync}`，支持 `shared-directory`、`symlink-per-entry`（Windows 无管理员权限时自动回退 Directory Junction）和 `copy` 三种模式；引入逐项所有权标记（`local/skills-sync.json`）、源/目标哈希校验、`.system` 等系统目录保留、非空目录保护与 `--replace` 备份替换，并接入统一 `rollback`。
+- **上下文与 Skill 审计**：新增 `context` 命令与 GUI「上下文审计」（`Ctrl+K`），识别 MCP 路由折叠状态、公共 Skill 目录泄漏、目录软链共享及重复插件条目。
+- **Magpie 只读集成**：新增 `magpie.py` 与 `mcpmanager magpie {status,agents,library,diff}`，只读查看 Magpie 纳管状态与跨平台路径差异。
+- **GUI 多目标侧栏**：侧栏升级为 Windows / WSL 两级分组树，展示各 Agent 的 MCP 与 Skill 数量。
+
+### 修复
+
+- 修复关闭弹窗后可能触发 `TclError: invalid command name` 弹窗及选中 WSL Agent 时 `current()` / `_current_or_warn()` 的边界处理。
+- 修复 `shared-directory --replace` 未实际替换非空目标目录以及从 `symlink-per-entry` 切换到 `copy` 时删除目录软链/Junction 的问题。
+
+### 测试
+
+- 新增 `tests/test_context_audit.py` 与 `tests/test_multi_target.py`，完整测试套件达到 112 项（Windows 下 111 通过、1 项 POSIX 专用用例按平台跳过）。
 
 ## [1.4.1] - 2026-11-25
 

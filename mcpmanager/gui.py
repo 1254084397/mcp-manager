@@ -305,7 +305,7 @@ class App:
         self.brand.pack(side="left", padx=(22, 12), pady=16)
         self._theme(self.brand, bg="header", fg="sidebar_text")
 
-        self.brand_sub = tk.Label(self.header, text="跨 Agent 的 MCP 配置管理", font=(FONT, 9))
+        self.brand_sub = tk.Label(self.header, text="跨 Agent 的 MCP 与运行目标管理", font=(FONT, 9))
         self.brand_sub.pack(side="left", pady=20)
         self._theme(self.brand_sub, bg="header", fg="muted")
 
@@ -677,7 +677,7 @@ class App:
         if self.agent_id in wsl_agents:
             messagebox.showinfo(
                 "WSL Agent",
-                "当前选中的是 WSL Agent，请使用 CLI（如 mcpmanager status / sync --target ...）管理其配置。",
+                "WSL Agent 暂不支持从桌面端直接修改，请使用 CLI（如 mcpmanager sync --target ...）。",
                 parent=self.root,
             )
             return None
@@ -786,7 +786,7 @@ class App:
 
         if self.agent_id is None or self.agent_id not in self.profiles:
             self.hint.configure(
-                text="本机尚未检测到已安装的 Agent 配置。支持的类型定义在 mcpmanager/agents/*.toml，检测到配置文件后会自动显示。",
+                text="未检测到已安装的 Agent 配置，检测到对应配置文件后会自动显示。",
                 fg=self.palette()["warn"],
             )
             self._set_details("当前没有选中的 Agent。\n\n请先安装 Agent，或使用“扫描全部”/“刷新”重新检测。")
@@ -1435,7 +1435,7 @@ class App:
         ).pack(anchor="w", padx=20, pady=(16, 4))
         tk.Label(
             window,
-            text="填写 command 或 URL。保存后只登记到本地注册表，并生成候选配置；确认差异后才会写入 Agent。",
+            text="填写启动命令或 URL，保存后先登记到本地注册表并生成候选，确认差异后才会写入 Agent。",
             bg=colors["bg"], fg=colors["muted"], font=(FONT, 9), justify="left",
         ).pack(anchor="w", padx=20, pady=(0, 10))
 
@@ -2470,7 +2470,7 @@ class App:
         messagebox.showinfo(
             "关于 MCP Manager",
             f"MCP Manager {__version__}\n\n"
-            "跨 Agent 的 MCP 配置管理工具。\n"
+            "跨 Agent 的 MCP 与 Skills 管理工具。\n"
             "Agent 差异由 mcpmanager/agents/*.toml 声明，无需改代码。\n\n"
             f"数据目录：{paths.DATA_DIR}\n"
             f"项目主页：{REPO_URL}",

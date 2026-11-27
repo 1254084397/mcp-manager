@@ -773,7 +773,7 @@ def _cmd_context(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     from . import __version__
 
-    parser = argparse.ArgumentParser(prog="mcpmanager", description="跨 Agent 的 MCP 管理器")
+    parser = argparse.ArgumentParser(prog="mcpmanager", description="跨 Agent 的 MCP 与 Skills 管理器")
     parser.add_argument("--version", action="version", version=f"mcpmanager {__version__}")
     parser.add_argument(
         "--read-only",
@@ -893,12 +893,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     skills_parser = sub.add_parser("skills", help="管理各目标下的 Agent Skills")
     skills_sub = skills_parser.add_subparsers(dest="skills_action", required=True)
-    for name in ("list", "status"):
-        sp = skills_sub.add_parser(name)
+    for name, help_text in (("list", "列出各 Agent 的 Skills 目录与数量"), ("status", "查看 Skills 同步状态与模式")):
+        sp = skills_sub.add_parser(name, help=help_text)
         sp.add_argument("--target", default="windows")
         sp.add_argument("--json", action="store_true")
         sp.set_defaults(func=_cmd_skills)
-    sp = skills_sub.add_parser("sync")
+    sp = skills_sub.add_parser("sync", help="安全同步 Skills 到指定 Agent")
     sp.add_argument("--target", default="windows")
     sp.add_argument("--source", default="pi")
     sp.add_argument("--agent", required=True)
@@ -911,8 +911,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     magpie_parser = sub.add_parser("magpie", help="只读查看 Magpie 纳管状态与路径差异")
     magpie_sub = magpie_parser.add_subparsers(dest="magpie_action", required=True)
-    for name in ("status", "agents", "library", "diff"):
-        mp = magpie_sub.add_parser(name)
+    for name, help_text in (
+        ("status", "查看 Magpie 纳管概览"),
+        ("agents", "列出 Magpie 纳管的 Agent"),
+        ("library", "查看 Magpie Skill 总库"),
+        ("diff", "检查跨平台路径与配置差异"),
+    ):
+        mp = magpie_sub.add_parser(name, help=help_text)
         mp.add_argument("--json", action="store_true")
         mp.set_defaults(func=_cmd_magpie)
 
